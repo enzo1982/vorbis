@@ -29,6 +29,9 @@
 #include "lpc.h"
 #include "registry.h"
 #include "misc.h"
+#ifdef __SSE__												/* SSE Optimize */
+#include "xmmlib.h"
+#endif														/* SSE Optimize */
 
 /* pcm accumulator examples (not exhaustive):
 
@@ -70,6 +73,10 @@
 
 /* block abstraction setup *********************************************/
 
+#ifdef	__SSE__											/* SSE Optimize */
+#undef DWORD_ALIGN
+#define DWORD_ALIGN 16
+#endif													/* SSE Optimize */
 #ifndef WORD_ALIGN
 #define WORD_ALIGN 8
 #endif
@@ -100,7 +107,11 @@ int vorbis_block_init(vorbis_dsp_state *v, vorbis_block *vb){
 }
 
 void *_vorbis_block_alloc(vorbis_block *vb,long bytes){
+#ifdef	__SSE__
+  bytes=(bytes+(DWORD_ALIGN-1)) & ~(DWORD_ALIGN-1);
+#else
   bytes=(bytes+(WORD_ALIGN-1)) & ~(WORD_ALIGN-1);
+#endif
   if(bytes+vb->localtop>vb->localalloc){
     /* can't just _ogg_realloc... there are outstanding pointers */
     if(vb->localstore){
@@ -644,7 +655,39 @@ int vorbis_analysis_blockout(vorbis_dsp_state *v,vorbis_block *vb){
   for(i=0;i<vi->channels;i++){
     vbi->pcmdelay[i]=
       _vorbis_block_alloc(vb,(vb->pcmend+beginW)*sizeof(*vbi->pcmdelay[i]));
+#ifdef __SSE__											/* SSE Optimize */
+	{
+		int j;
+		float	*d	 = (float*)(vbi->pcmdelay[i]);
+		float	*s	 = (float*)(v->pcm[i]);
+		for(j=0;j<vb->pcmend+beginW;)
+		{
+			__m128	XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7;
+			XMM0	 = _mm_load_ps(s   );
+			XMM1	 = _mm_load_ps(s+ 4);
+			XMM2	 = _mm_load_ps(s+ 8);
+			XMM3	 = _mm_load_ps(s+12);
+			XMM4	 = _mm_load_ps(s+16);
+			XMM5	 = _mm_load_ps(s+20);
+			XMM6	 = _mm_load_ps(s+24);
+			XMM7	 = _mm_load_ps(s+28);
+			_mm_store_ps(d   , XMM0);
+			_mm_store_ps(d+ 4, XMM1);
+			_mm_store_ps(d+ 8, XMM2);
+			_mm_store_ps(d+12, XMM3);
+			_mm_store_ps(d+16, XMM4);
+			_mm_store_ps(d+20, XMM5);
+			_mm_store_ps(d+24, XMM6);
+			_mm_store_ps(d+28, XMM7);
+			_mm_prefetch((const char*)(s+64), _MM_HINT_T0);
+			s	+= 32;
+			d	+= 32;
+			j	+= 32;
+		}
+	}
+#else													/* SSE Optimize */
     memcpy(vbi->pcmdelay[i],v->pcm[i],(vb->pcmend+beginW)*sizeof(*vbi->pcmdelay[i]));
+#endif													/* SSE Optimize */
     vb->pcm[i]=vbi->pcmdelay[i]+beginW;
 
     /* before we added the delay
@@ -677,8 +720,72 @@ int vorbis_analysis_blockout(vorbis_dsp_state *v,vorbis_block *vb){
       v->pcm_current-=movementW;
 
       for(i=0;i<vi->channels;i++)
+#ifdef __SSE__											/* SSE Optimize */
+	{
+		int j;
+		float	*d	 = (float*)(v->pcm[i]);
+		float	*s	 = (float*)(v->pcm[i]+movementW);
+		if(s>=d)
+		{
+			for(j=0;j<v->pcm_current;)
+			{
+				__m128	XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7;
+				XMM0	 = _mm_load_ps(s   );
+				XMM1	 = _mm_load_ps(s+ 4);
+				XMM2	 = _mm_load_ps(s+ 8);
+				XMM3	 = _mm_load_ps(s+12);
+				XMM4	 = _mm_load_ps(s+16);
+				XMM5	 = _mm_load_ps(s+20);
+				XMM6	 = _mm_load_ps(s+24);
+				XMM7	 = _mm_load_ps(s+28);
+				_mm_store_ps(d   , XMM0);
+				_mm_store_ps(d+ 4, XMM1);
+				_mm_store_ps(d+ 8, XMM2);
+				_mm_store_ps(d+12, XMM3);
+				_mm_store_ps(d+16, XMM4);
+				_mm_store_ps(d+20, XMM5);
+				_mm_store_ps(d+24, XMM6);
+				_mm_store_ps(d+28, XMM7);
+				s	+= 32;
+				d	+= 32;
+				j	+= 32;
+				_mm_prefetch((const char*)(s+64), _MM_HINT_NTA);
+			}
+		}
+		else
+		{
+			d	+= v->pcm_current;
+			s	+= v->pcm_current;
+			for(j=0;j<v->pcm_current;)
+			{
+				__m128	XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7;
+				XMM0	 = _mm_load_ps(s-32);
+				XMM1	 = _mm_load_ps(s-28);
+				XMM2	 = _mm_load_ps(s-24);
+				XMM3	 = _mm_load_ps(s-20);
+				XMM4	 = _mm_load_ps(s-16);
+				XMM5	 = _mm_load_ps(s-12);
+				XMM6	 = _mm_load_ps(s- 8);
+				XMM7	 = _mm_load_ps(s- 4);
+				_mm_store_ps(d-32, XMM0);
+				_mm_store_ps(d-28, XMM1);
+				_mm_store_ps(d-24, XMM2);
+				_mm_store_ps(d-20, XMM3);
+				_mm_store_ps(d-16, XMM4);
+				_mm_store_ps(d-12, XMM5);
+				_mm_store_ps(d- 8, XMM6);
+				_mm_store_ps(d- 4, XMM7);
+				s	-= 32;
+				d	-= 32;
+				j	+= 32;
+				_mm_prefetch((const char*)(s-64), _MM_HINT_NTA);
+			}
+		}
+	}
+#else													/* SSE Optimize */
         memmove(v->pcm[i],v->pcm[i]+movementW,
                 v->pcm_current*sizeof(*v->pcm[i]));
+#endif													/* SSE Optimize */
 
 
       v->lW=v->W;
@@ -736,6 +843,53 @@ int vorbis_synthesis_init(vorbis_dsp_state *v,vorbis_info *vi){
   return 0;
 }
 
+#ifdef	__SSE__											/* SSE Optimize */
+STIN void vorbis_synthesis_blockin_pmadd(float *pcm, float *w, float *p, long count)
+{
+	int	i;
+	for(i=0;i<count;i+=16)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7;
+		XMM1	 = _mm_load_ps(w+count-i- 4);
+		XMM4	 = _mm_load_ps(w+count-i- 8);
+		XMM2	 = _mm_load_ps(p+i   );
+		XMM6	 = _mm_load_ps(w+i   );
+		XMM5	 = _mm_load_ps(p+i+ 4);
+		XMM7	 = _mm_load_ps(w+i+ 4);
+		XMM0	 = _mm_load_ps(pcm+i   );
+		XMM3	 = _mm_load_ps(pcm+i+ 4);
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM1, _MM_SHUFFLE(0,1,2,3));
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM4, _MM_SHUFFLE(0,1,2,3));
+		XMM2	 = _mm_mul_ps(XMM2, XMM6);
+		XMM5	 = _mm_mul_ps(XMM5, XMM7);
+		XMM0	 = _mm_mul_ps(XMM0, XMM1);
+		XMM3	 = _mm_mul_ps(XMM3, XMM4);
+		XMM1	 = _mm_load_ps(pcm+i+ 8);
+		XMM4	 = _mm_load_ps(pcm+i+12);
+		XMM0	 = _mm_add_ps(XMM0, XMM2);
+		XMM3	 = _mm_add_ps(XMM3, XMM5);
+		XMM2	 = _mm_load_ps(w+count-i-12);
+		XMM6	 = _mm_load_ps(w+i+ 8);
+		XMM5	 = _mm_load_ps(w+count-i-16);
+		XMM7	 = _mm_load_ps(w+i+12);
+		_mm_store_ps(pcm+i   , XMM0);
+		_mm_store_ps(pcm+i+ 4, XMM3);
+		XMM0	 = _mm_load_ps(p+i+ 8);
+		XMM3	 = _mm_load_ps(p+i+12);
+		XMM2	 = _mm_shuffle_ps(XMM2, XMM2, _MM_SHUFFLE(0,1,2,3));
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM5, _MM_SHUFFLE(0,1,2,3));
+		XMM0	 = _mm_mul_ps(XMM0, XMM6);
+		XMM3	 = _mm_mul_ps(XMM3, XMM7);
+		XMM1	 = _mm_mul_ps(XMM1, XMM2);
+		XMM4	 = _mm_mul_ps(XMM4, XMM5);
+		XMM1	 = _mm_add_ps(XMM1, XMM0);
+		XMM4	 = _mm_add_ps(XMM4, XMM3);
+		_mm_store_ps(pcm+i+ 8, XMM1);
+		_mm_store_ps(pcm+i+12, XMM4);
+	}
+}
+#endif													/* SSE Optimize */
+
 /* Unlike in analysis, the window is only partially applied for each
    block.  The time domain envelope is not yet handled at the point of
    calling (as it relies on the previous block). */
@@ -791,6 +945,36 @@ int vorbis_synthesis_blockin(vorbis_dsp_state *v,vorbis_block *vb){
     for(j=0;j<vi->channels;j++){
       /* the overlap/add section */
       if(v->lW){
+#ifdef	__SSE__											/* SSE Optimize */
+	if(v->W){
+		/* large/large */
+		const float	*w		 = _vorbis_window_get(b->window[1]-hs);
+		float	*pcm	 = v->pcm[j]+prevCenter;
+		float	*p		 = vb->pcm[j];
+		vorbis_synthesis_blockin_pmadd(pcm, w, p, n1);
+	}else{
+		/* large/small */
+		const float *w		 = _vorbis_window_get(b->window[0]-hs);
+		float *pcm		 = v->pcm[j]+prevCenter+n1/2-n0/2;
+		float *p		 = vb->pcm[j];
+		vorbis_synthesis_blockin_pmadd(pcm, w, p, n0);
+	}
+	  }else{
+	if(v->W){
+		/* small/large */
+		const float	*w		 = _vorbis_window_get(b->window[0]-hs);
+		float	*pcm	 = v->pcm[j]+prevCenter;
+		float	*p		 = vb->pcm[j]+n1/2-n0/2;
+		vorbis_synthesis_blockin_pmadd(pcm, w, p, n0);
+		memcpy(pcm+n0, p+n0, (n1/2-n0/2)*sizeof(float));
+	}else{
+		/* small/small */
+		const float	*w		 = _vorbis_window_get(b->window[0]-hs);
+		float	*pcm	 = v->pcm[j]+prevCenter;
+		float	*p		 = vb->pcm[j];
+		vorbis_synthesis_blockin_pmadd(pcm, w, p, n0);
+	}
+#else														/* SSE Optimize */
         if(v->W){
           /* large/large */
           const float *w=_vorbis_window_get(b->window[1]-hs);
@@ -824,14 +1008,38 @@ int vorbis_synthesis_blockin(vorbis_dsp_state *v,vorbis_block *vb){
           for(i=0;i<n0;i++)
             pcm[i]=pcm[i]*w[n0-i-1] +p[i]*w[i];
         }
+#endif														/* SSE Optimize */
       }
 
       /* the copy section */
       {
         float *pcm=v->pcm[j]+thisCenter;
         float *p=vb->pcm[j]+n;
+#ifdef	__SSE__											/* SSE Optimize */
+	for(i=0;i<n;i+=32)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7;
+		XMM0	 = _mm_load_ps(p+i   );
+		XMM1	 = _mm_load_ps(p+i+ 4);
+		XMM2	 = _mm_load_ps(p+i+ 8);
+		XMM3	 = _mm_load_ps(p+i+12);
+		XMM4	 = _mm_load_ps(p+i+16);
+		XMM5	 = _mm_load_ps(p+i+20);
+		XMM6	 = _mm_load_ps(p+i+24);
+		XMM7	 = _mm_load_ps(p+i+28);
+		_mm_store_ps(pcm+i   , XMM0);
+		_mm_store_ps(pcm+i+ 4, XMM1);
+		_mm_store_ps(pcm+i+ 8, XMM2);
+		_mm_store_ps(pcm+i+12, XMM3);
+		_mm_store_ps(pcm+i+16, XMM4);
+		_mm_store_ps(pcm+i+20, XMM5);
+		_mm_store_ps(pcm+i+24, XMM6);
+		_mm_store_ps(pcm+i+28, XMM7);
+	}
+#else														/* SSE Optimize */
         for(i=0;i<n;i++)
           pcm[i]=p[i];
+#endif														/* SSE Optimize */
       }
     }
 

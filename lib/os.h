@@ -23,6 +23,13 @@
 #include <math.h>
 #include <ogg/os_types.h>
 
+#ifdef HAVE_STDINT_H
+#  include <stdint.h>
+#elif defined _MSC_VER
+#  define int32_t __int32
+#  define uint32_t unsigned __int32
+#endif
+
 #include "misc.h"
 
 #ifndef _V_IFDEFJAIL_H_

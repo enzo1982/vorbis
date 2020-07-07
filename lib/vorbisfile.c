@@ -28,6 +28,9 @@
 
 #include "os.h"
 #include "misc.h"
+#ifdef __SSE__												/* SSE Optimize */
+#include "xmmlib.h"
+#endif														/* SSE Optimize */
 
 /* A 'chained bitstream' is a Vorbis bitstream that contains more than
    one logical bitstream arranged end to end (the only form of Ogg
@@ -1917,6 +1920,135 @@ static int host_is_big_endian() {
   return 0;
 }
 
+#ifdef	__SSE__											/* SSE Optimize */
+STIN void ov_read_float2pcm(float *src1, float *src2, short *dest, long samples)
+{
+	register long	i;
+#if	defined(__SSE2__)
+	int samples8	 = samples&(~15);
+	static _MM_ALIGN16 const float parm[4]	 = {
+		32768.f, 32768.f, 32768.f, 32768.f
+	};
+	for(i=0;i<samples8;i+=8)
+	{
+		__m128i	XMM0	 = _mm_castps_si128(_mm_loadu_ps(src1+i  ));
+		__m128i	XMM2	 = _mm_castps_si128(_mm_loadu_ps(src1+i+4));
+		__m128i	XMM1	 = _mm_castps_si128(_mm_loadu_ps(src2+i  ));
+		__m128i	XMM3	 = _mm_castps_si128(_mm_loadu_ps(src2+i+4));
+		XMM0	 = _mm_castps_si128(_mm_mul_ps(_mm_castsi128_ps(XMM0), PM128(parm)));
+		XMM2	 = _mm_castps_si128(_mm_mul_ps(_mm_castsi128_ps(XMM2), PM128(parm)));
+		XMM1	 = _mm_castps_si128(_mm_mul_ps(_mm_castsi128_ps(XMM1), PM128(parm)));
+		XMM3	 = _mm_castps_si128(_mm_mul_ps(_mm_castsi128_ps(XMM3), PM128(parm)));
+		XMM0	 = _mm_cvtps_epi32(_mm_castsi128_ps(XMM0));
+		XMM2	 = _mm_cvtps_epi32(_mm_castsi128_ps(XMM2));
+		XMM1	 = _mm_cvtps_epi32(_mm_castsi128_ps(XMM1));
+		XMM3	 = _mm_cvtps_epi32(_mm_castsi128_ps(XMM3));
+		XMM0	 = _mm_packs_epi32(XMM0, XMM2);
+		XMM1	 = _mm_packs_epi32(XMM1, XMM3);
+		XMM2	 = XMM0;
+		XMM0	 = _mm_unpacklo_epi16(XMM0, XMM1);
+		XMM2	 = _mm_unpackhi_epi16(XMM2, XMM1);
+		_mm_storeu_si128((__m128i*)(dest+i*2   ), XMM0);
+		_mm_storeu_si128((__m128i*)(dest+i*2+ 8), XMM2);
+	}
+#else
+	int samples4	 = samples&(~7);
+	static _MM_ALIGN16 const float parm[4]	 = {
+		32768.f, 32768.f, 32768.f, 32768.f
+	};
+	register __m128	XMM0, XMM1, XMM2, XMM3;
+	register __m64	MM0, MM1, MM2, MM3, MM4, MM5, MM6, MM7;
+	for(i=0;i<samples4;i+=8){
+		XMM0	 = _mm_loadu_ps(src1+i  );
+		XMM1	 = _mm_loadu_ps(src2+i  );
+		XMM2	 = _mm_loadu_ps(src1+i+4);
+		XMM3	 = _mm_loadu_ps(src2+i+4);
+		XMM0	 = _mm_mul_ps(XMM0, PM128(parm));
+		XMM1	 = _mm_mul_ps(XMM1, PM128(parm));
+		XMM2	 = _mm_mul_ps(XMM2, PM128(parm));
+		XMM3	 = _mm_mul_ps(XMM3, PM128(parm));
+		MM0		 = _mm_cvtps_pi32(XMM0);
+		MM2		 = _mm_cvtps_pi32(XMM1);
+		MM4		 = _mm_cvtps_pi32(XMM2);
+		MM6		 = _mm_cvtps_pi32(XMM3);
+
+		XMM0	 = _mm_movehl_ps(XMM0, XMM0);
+		XMM1	 = _mm_movehl_ps(XMM1, XMM1);
+		XMM2	 = _mm_movehl_ps(XMM2, XMM2);
+		XMM3	 = _mm_movehl_ps(XMM3, XMM3);
+
+		MM1		 = _mm_cvtps_pi32(XMM0);
+		MM3		 = _mm_cvtps_pi32(XMM1);
+		MM5		 = _mm_cvtps_pi32(XMM2);
+		MM7		 = _mm_cvtps_pi32(XMM3);
+
+		MM0		 = _mm_packs_pi32(MM0, MM1);
+		MM2		 = _mm_packs_pi32(MM2, MM3);
+		MM4		 = _mm_packs_pi32(MM4, MM5);
+		MM6		 = _mm_packs_pi32(MM6, MM7);
+
+		MM1		 = MM0;
+		MM5		 = MM4;
+
+		MM0	 = _mm_unpacklo_pi16(MM0, MM2);
+		MM1	 = _mm_unpackhi_pi16(MM1, MM2);
+		MM4	 = _mm_unpacklo_pi16(MM4, MM6);
+		MM5	 = _mm_unpackhi_pi16(MM5, MM6);
+
+		PM64(dest+i*2   )	 = MM0;
+		PM64(dest+i*2+ 4)	 = MM1;
+		PM64(dest+i*2+ 8)	 = MM4;
+		PM64(dest+i*2+12)	 = MM5;
+	}
+	samples4	 = samples&(~3);
+	for(;i<samples4;i+=4){
+		XMM0	 = _mm_loadu_ps(src1+i  );
+		XMM1	 = _mm_loadu_ps(src2+i  );
+		XMM0	 = _mm_mul_ps(XMM0, PM128(parm));
+		XMM1	 = _mm_mul_ps(XMM1, PM128(parm));
+
+		MM0		 = _mm_cvtps_pi32(XMM0);
+		MM2		 = _mm_cvtps_pi32(XMM1);
+
+		XMM0	 = _mm_movehl_ps(XMM0, XMM0);
+		XMM1	 = _mm_movehl_ps(XMM1, XMM1);
+
+		MM1		 = _mm_cvtps_pi32(XMM0);
+		MM3		 = _mm_cvtps_pi32(XMM1);
+
+		MM0		 = _mm_packs_pi32(MM0, MM1);
+		MM2		 = _mm_packs_pi32(MM2, MM3);
+
+		MM1		 = MM0;
+
+		MM0	 = _mm_unpacklo_pi16(MM0, MM2);
+		MM1	 = _mm_unpackhi_pi16(MM1, MM2);
+
+		PM64(dest+i*2   )	 = MM0;
+		PM64(dest+i*2+ 4)	 = MM1;
+	}
+	_mm_empty();
+#endif
+	for(;i<samples;i++)
+	{
+		float	f1	 = src1[i];
+		float	f2	 = src2[i];
+		f1	*= 32768.f;
+		f2	*= 32768.f;
+		if(f1>32767.f)
+			f1	 = 32767.f;
+		if(f1<-32768.f)
+			f1	 =-32768.f;
+		if(f2>32767.f)
+			f2	 = 32767.f;
+		if(f2<-32768.f)
+			f2	 =-32768.f;
+		dest[i*2  ]	 = (short)f1;
+		dest[i*2+1]	 = (short)f2;
+	}
+}
+#endif														/* SSE Optimize */
+
 /* up to this point, everything could more or less hide the multiple
    logical bitstream nature of chaining from the toplevel application
    if the toplevel application didn't particularly care.  However, at
@@ -2020,6 +2152,28 @@ long ov_read_filter(OggVorbis_File *vf,char *buffer,int length,
 
         if(host_endian==bigendianp){
           if(sgned){
+#ifdef __SSE__												/* SSE Optimize */
+		if(channels==2){
+			ov_read_float2pcm(pcm[0], pcm[1], ((short *)buffer), samples);
+		}else{
+			vorbis_fpu_setround(&fpu);
+			for(i=0;i<channels;i++){ /* It's faster in this order */
+				float	*src	 = pcm[i];
+				short	*dest	 = ((short *)buffer)+i;
+				for(j=0;j<samples;j++){
+					val	 = vorbis_ftoi(src[j]*32768.f);
+					if(val>32767)
+						val	 = 32767;
+					else
+						if(val<-32768)
+							val	 = -32768;
+					*dest=val;
+					dest+=channels;
+				}
+			}
+			vorbis_fpu_restore(fpu);
+		}
+#else														/* SSE Optimize */
 
             vorbis_fpu_setround(&fpu);
             for(i=0;i<channels;i++) { /* It's faster in this order */
@@ -2035,6 +2189,7 @@ long ov_read_filter(OggVorbis_File *vf,char *buffer,int length,
             }
             vorbis_fpu_restore(fpu);
 
+#endif														/* SSE Optimize */
           }else{
 
             vorbis_fpu_setround(&fpu);

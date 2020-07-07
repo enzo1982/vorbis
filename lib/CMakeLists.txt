@@ -24,6 +24,7 @@ set(VORBIS_HEADERS
     codec_internal.h
     backends.h
     bitrate.h
+    xmmlib.h
 )
 
 set(VORBIS_SOURCES
@@ -47,6 +48,8 @@ set(VORBIS_SOURCES
     sharedbook.c
     lookup.c
     bitrate.c
+    cpu.c
+    xmmlib.c
 )
 
 set(VORBISFILE_SOURCES

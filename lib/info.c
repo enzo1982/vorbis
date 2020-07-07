@@ -28,9 +28,20 @@
 #include "psy.h"
 #include "misc.h"
 #include "os.h"
+#ifdef __SSE__												/* SSE Optimize */
+#include "xmmlib.h"
+#endif														/* SSE Optimize */
 
 #define GENERAL_VENDOR_STRING "aoTuV Beta 6.03 (2020)"
+#if defined(__SSE3__)
+#define ENCODE_VENDOR_STRING "BS; LancerMod(SSE3) (based on aoTuV 6.03 (2020))"
+#elif defined(__SSE2__)
+#define ENCODE_VENDOR_STRING "BS; LancerMod(SSE2) (based on aoTuV 6.03 (2020))"
+#elif defined(__SSE__)
+#define ENCODE_VENDOR_STRING "BS; LancerMod(SSE) (based on aoTuV 6.03 (2020))"
+#else
 #define ENCODE_VENDOR_STRING "AO; aoTuV 6.03 (2020) (based on libVorbis 1.3.7)"
+#endif
 
 /* helpers */
 static void _v_writestring(oggpack_buffer *o,const char *s, int bytes){
@@ -55,12 +66,21 @@ void vorbis_comment_init(vorbis_comment *vc){
 }
 
 void vorbis_comment_add(vorbis_comment *vc,const char *comment){
+#ifdef	__SSE__												/* SSE Optimize */
+  vc->user_comments=realloc(vc->user_comments,
+                            (vc->comments+2)*sizeof(*vc->user_comments));
+  vc->comment_lengths=realloc(vc->comment_lengths,
+                                  (vc->comments+2)*sizeof(*vc->comment_lengths));
+  vc->comment_lengths[vc->comments]=strlen(comment);
+  vc->user_comments[vc->comments]=malloc(vc->comment_lengths[vc->comments]+1);
+#else														/* SSE Optimize */
   vc->user_comments=_ogg_realloc(vc->user_comments,
                             (vc->comments+2)*sizeof(*vc->user_comments));
   vc->comment_lengths=_ogg_realloc(vc->comment_lengths,
                                   (vc->comments+2)*sizeof(*vc->comment_lengths));
   vc->comment_lengths[vc->comments]=strlen(comment);
   vc->user_comments[vc->comments]=_ogg_malloc(vc->comment_lengths[vc->comments]+1);
+#endif														/* SSE Optimize */
   strcpy(vc->user_comments[vc->comments], comment);
   vc->comments++;
   vc->user_comments[vc->comments]=NULL;
@@ -131,6 +151,15 @@ int vorbis_comment_query_count(vorbis_comment *vc, const char *tag){
 void vorbis_comment_clear(vorbis_comment *vc){
   if(vc){
     long i;
+#ifdef	__SSE__												/* SSE Optimize */
+    if(vc->user_comments){
+      for(i=0;i<vc->comments;i++)
+        if(vc->user_comments[i]) free(vc->user_comments[i]);
+      free(vc->user_comments);
+    }
+    if(vc->comment_lengths) free(vc->comment_lengths);
+    if(vc->vendor) free(vc->vendor);
+#else														/* SSE Optimize */
     if(vc->user_comments){
       for(i=0;i<vc->comments;i++)
         if(vc->user_comments[i])_ogg_free(vc->user_comments[i]);
@@ -138,6 +167,7 @@ void vorbis_comment_clear(vorbis_comment *vc){
     }
     if(vc->comment_lengths)_ogg_free(vc->comment_lengths);
     if(vc->vendor)_ogg_free(vc->vendor);
+#endif														/* SSE Optimize */
     memset(vc,0,sizeof(*vc));
   }
 }
@@ -245,12 +275,29 @@ static int _vorbis_unpack_comment(vorbis_comment *vc,oggpack_buffer *opb){
   int vendorlen=oggpack_read(opb,32);
   if(vendorlen<0)goto err_out;
   if(vendorlen>opb->storage-8)goto err_out;
+#ifdef	__SSE__												/* SSE Optimize */
+  vc->vendor=calloc(vendorlen+1,1);
+#else														/* SSE Optimize */
   vc->vendor=_ogg_calloc(vendorlen+1,1);
+#endif														/* SSE Optimize */
   _v_readstring(opb,vc->vendor,vendorlen);
   i=oggpack_read(opb,32);
   if(i<0)goto err_out;
   if(i>((opb->storage-oggpack_bytes(opb))>>2))goto err_out;
   vc->comments=i;
+#ifdef	__SSE__												/* SSE Optimize */
+  vc->user_comments=calloc(vc->comments+1,sizeof(*vc->user_comments));
+  vc->comment_lengths=calloc(vc->comments+1, sizeof(*vc->comment_lengths));
+
+  for(i=0;i<vc->comments;i++){
+    int len=oggpack_read(opb,32);
+    if(len<0)goto err_out;
+    if(len>opb->storage-oggpack_bytes(opb))goto err_out;
+    vc->comment_lengths[i]=len;
+    vc->user_comments[i]=calloc(len+1,1);
+    _v_readstring(opb,vc->user_comments[i],len);
+  }	  
+#else														/* SSE Optimize */
   vc->user_comments=_ogg_calloc(vc->comments+1,sizeof(*vc->user_comments));
   vc->comment_lengths=_ogg_calloc(vc->comments+1, sizeof(*vc->comment_lengths));
 
@@ -262,6 +309,7 @@ static int _vorbis_unpack_comment(vorbis_comment *vc,oggpack_buffer *opb){
     vc->user_comments[i]=_ogg_calloc(len+1,1);
     _v_readstring(opb,vc->user_comments[i],len);
   }
+#endif														/* SSE Optimize */
   if(oggpack_read(opb,1)!=1)goto err_out; /* EOP check */
 
   return(0);

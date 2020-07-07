@@ -21,6 +21,8 @@
 #include "backends.h"
 #include "envelope.h"
 
+#include "os.h"
+
 #ifndef EHMER_MAX
 #define EHMER_MAX 56
 #endif
@@ -103,7 +105,7 @@ typedef struct {
 
   float *ath;
   long  *octave;             /* in n.ocshift format */
-  long  *bark;
+  int32_t *bark;
 
   long  firstoc;
   long  shiftoc;
@@ -129,6 +131,20 @@ typedef struct {
   int nn75pt; /* 75 % partition for noise  normalization */
   int nn50pt; /* half partition for noise normalization */
   int nn25pt; /* quarter partition for noise normalization */
+#ifdef __SSE__
+  int   midpoint1;	/* for bark_noise_hybridmp */
+  int   midpoint1_4;
+  int   midpoint1_8;
+  int   midpoint1_16;
+  int   midpoint2;
+  int   midpoint2_4;
+  int   midpoint2_8;
+  int   midpoint2_16;
+
+  long  *octsft; /* shifted octave */
+  long  *octend; /* for seed_loop */
+  long  *octpos; /* for max_seeds */
+#endif
 } vorbis_look_psy;
 
 /* typedef for aoTuV */

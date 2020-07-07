@@ -27,6 +27,9 @@
 #include "envelope.h"
 #include "mdct.h"
 #include "misc.h"
+#ifdef __SSE__												/* SSE Optimize */
+#include "xmmlib.h"
+#endif														/* SSE Optimize */
 
 /* Origianl band */
 // band_begin[VE_BANDS]= {2, 4, 6, 9,13,17,22};
@@ -52,8 +55,13 @@ void _ve_envelope_init(envelope_lookup *e,vorbis_info *vi){
   mdct_init(&e->mdct,n);
 
   for(i=0;i<n;i++){
+#if 0
     e->mdct_win[i]=sin(i/(n-1.)*M_PI);
     e->mdct_win[i]*=e->mdct_win[i];
+#else
+    float t = sin(i/(n-1.)*M_PI);
+    e->mdct_win[i] = t*t;
+#endif
   }
 
   for(i=0;i<VE_BANDS;i++){
@@ -105,7 +113,11 @@ static int _ve_amp(envelope_lookup *ve,
      itself (for low power signals) */
 
   float minV=ve->minenergy;
+#ifdef	__SSE__												/* SSE Optimize */
+  float *vec = (float*)_ogg_alloca(n*sizeof(*vec));
+#else														/* SSE Optimize */
   float *vec=alloca(n*sizeof(*vec));
+#endif														/* SSE Optimize */
 
   /* stretch is used to gradually lengthen the number of windows
      considered prevoius-to-potential-trigger */
@@ -118,9 +130,50 @@ static int _ve_amp(envelope_lookup *ve,
     totalshift+pos*ve->searchstep);*/
 
  /* window and transform */
+#ifdef	__SSE__												/* SSE Optimize */
+	for(i=0;i<n;i+=32)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3;
+		__m128	XMM4, XMM5, XMM6, XMM7;
+		XMM0	 = _mm_load_ps(data+i   );
+		XMM4	 = _mm_load_ps(ve->mdct_win+i   );
+		XMM1	 = _mm_load_ps(data+i+ 4);
+		XMM5	 = _mm_load_ps(ve->mdct_win+i+ 4);
+		XMM2	 = _mm_load_ps(data+i+ 8);
+		XMM6	 = _mm_load_ps(ve->mdct_win+i+ 8);
+		XMM3	 = _mm_load_ps(data+i+12);
+		XMM7	 = _mm_load_ps(ve->mdct_win+i+12);
+		XMM0	 = _mm_mul_ps(XMM0, XMM4);
+		XMM4	 = _mm_load_ps(data+i+16);
+		XMM1	 = _mm_mul_ps(XMM1, XMM5);
+		XMM5	 = _mm_load_ps(ve->mdct_win+i+16);
+		XMM2	 = _mm_mul_ps(XMM2, XMM6);
+		XMM6	 = _mm_load_ps(data+i+20);
+		XMM3	 = _mm_mul_ps(XMM3, XMM7);
+		XMM7	 = _mm_load_ps(ve->mdct_win+i+20);
+		_mm_store_ps(vec+i   , XMM0);
+		XMM0	 = _mm_load_ps(data+i+24);
+		_mm_store_ps(vec+i+ 4, XMM1);
+		XMM1	 = _mm_load_ps(ve->mdct_win+i+24);
+		_mm_store_ps(vec+i+ 8, XMM2);
+		XMM2	 = _mm_load_ps(data+i+28);
+		_mm_store_ps(vec+i+12, XMM3);
+		XMM3	 = _mm_load_ps(ve->mdct_win+i+28);
+		XMM4	 = _mm_mul_ps(XMM4, XMM5);
+		XMM6	 = _mm_mul_ps(XMM6, XMM7);
+		XMM0	 = _mm_mul_ps(XMM0, XMM1);
+		XMM2	 = _mm_mul_ps(XMM2, XMM3);
+		_mm_store_ps(vec+i+16, XMM4);
+		_mm_store_ps(vec+i+20, XMM6);
+		_mm_store_ps(vec+i+24, XMM0);
+		_mm_store_ps(vec+i+28, XMM2);
+	}
+	mdct_forward(&ve->mdct, vec, vec/*, NULL*/);
+#else														/* SSE Optimize */
   for(i=0;i<n;i++)
     vec[i]=data[i]*ve->mdct_win[i];
   mdct_forward(&ve->mdct,vec,vec);
+#endif														/* SSE Optimize */
 
   /*_analysis_output_always("mdct",seq2,vec,n/2,0,1,0); */
 
@@ -151,6 +204,230 @@ static int _ve_amp(envelope_lookup *ve,
   /* perform spreading and limiting, also smooth the spectrum.  yes,
      the MDCT results in all real coefficients, but it still *behaves*
      like real/imaginary pairs */
+#ifdef	__SSE__												/* SSE Optimize */
+	{
+		static _MM_ALIGN16 const float mparm[4]	 = {
+			7.17711438e-7f/2.f, 7.17711438e-7f/2.f, 7.17711438e-7f/2.f, 7.17711438e-7f/2.f
+		};
+		static _MM_ALIGN16 const float aparm[4]	 = {
+			-764.6161886f/2.f, -764.6161886f/2.f, -764.6161886f/2.f, -764.6161886f/2.f
+		};
+		static _MM_ALIGN16 const float decayinit0[4]	 = {
+			0.f, 8.f,	16.f,	24.f
+		};
+		static _MM_ALIGN16 const float decayinit1[4]	 = {
+			32.f, 40.f,	48.f,	56.f
+		};
+		static _MM_ALIGN16 const float p16[4]	 = {
+			64.f,	64.f,	64.f,	64.f
+		};
+		__m128 MINV		 = _mm_set_ps1(minV);
+		float	*p	 = vec;
+		int midpoint	 = ((int)(-(minV-decay)/4.f)+15)&(~15);
+		int last_n		 = n/2;
+		__m128 DECAY0	 = _mm_set_ps1(decay);
+		__m128 DECAY1	 = _mm_set_ps1(decay);
+		DECAY0	 = _mm_sub_ps(DECAY0, PM128(decayinit0));
+		DECAY1	 = _mm_sub_ps(DECAY1, PM128(decayinit1));
+#if	defined(__SSE2__)
+		for(i=0;i<midpoint;i+=16,p+=8)
+		{
+			__m128	XMM0, XMM2;
+			__m128	XMM1, XMM3;
+#if	defined(__SSE3__)
+			XMM0	 = _mm_load_ps(vec+i   );
+			XMM1	 = _mm_load_ps(vec+i+ 4);
+			XMM2	 = _mm_load_ps(vec+i+ 8);
+			XMM3	 = _mm_load_ps(vec+i+12);
+			XMM0	 = _mm_mul_ps(XMM0, XMM0);
+			XMM1	 = _mm_mul_ps(XMM1, XMM1);
+			XMM2	 = _mm_mul_ps(XMM2, XMM2);
+			XMM3	 = _mm_mul_ps(XMM3, XMM3);
+			XMM0	 = _mm_hadd_ps(XMM0, XMM1);
+			XMM2	 = _mm_hadd_ps(XMM2, XMM3);
+#else
+			__m128	XMM4, XMM5;
+			XMM0	 = _mm_load_ps(vec+i   );
+			XMM2	 = _mm_load_ps(vec+i+ 8);
+			XMM4	 = _mm_load_ps(vec+i+ 4);
+			XMM5	 = _mm_load_ps(vec+i+12);
+			XMM1	 = XMM0;
+			XMM3	 = XMM2;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM4,_MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4,_MM_SHUFFLE(3,1,3,1));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5,_MM_SHUFFLE(2,0,2,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5,_MM_SHUFFLE(3,1,3,1));
+			XMM0	 = _mm_mul_ps(XMM0, XMM0);
+			XMM1	 = _mm_mul_ps(XMM1, XMM1);
+			XMM2	 = _mm_mul_ps(XMM2, XMM2);
+			XMM3	 = _mm_mul_ps(XMM3, XMM3);
+			XMM0	 = _mm_add_ps(XMM0, XMM1);
+			XMM2	 = _mm_add_ps(XMM2, XMM3);
+#endif
+			XMM0	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM0));
+			XMM2	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM2));
+			XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+			XMM2	 = _mm_mul_ps(XMM2, PM128(mparm));
+			XMM0	 = _mm_add_ps(XMM0, PM128(aparm));
+			XMM2	 = _mm_add_ps(XMM2, PM128(aparm));
+			XMM0	 = _mm_max_ps(XMM0, DECAY0);
+			XMM2	 = _mm_max_ps(XMM2, DECAY1);
+			XMM0	 = _mm_max_ps(XMM0, MINV);
+			XMM2	 = _mm_max_ps(XMM2, MINV);
+			_mm_store_ps(p  , XMM0);
+			_mm_store_ps(p+4, XMM2);
+			DECAY0	 = _mm_sub_ps(DECAY0, PM128(p16));
+			DECAY1	 = _mm_sub_ps(DECAY1, PM128(p16));
+		}
+		for(;i<last_n;i+=16,p+=8)
+		{
+			__m128	XMM0, XMM2;
+			__m128	XMM1, XMM3;
+#if	defined(__SSE3__)
+			XMM0	 = _mm_load_ps(vec+i   );
+			XMM1	 = _mm_load_ps(vec+i+ 4);
+			XMM2	 = _mm_load_ps(vec+i+ 8);
+			XMM3	 = _mm_load_ps(vec+i+12);
+			XMM0	 = _mm_mul_ps(XMM0, XMM0);
+			XMM1	 = _mm_mul_ps(XMM1, XMM1);
+			XMM2	 = _mm_mul_ps(XMM2, XMM2);
+			XMM3	 = _mm_mul_ps(XMM3, XMM3);
+			XMM0	 = _mm_hadd_ps(XMM0, XMM1);
+			XMM2	 = _mm_hadd_ps(XMM2, XMM3);
+#else
+			__m128	XMM4, XMM5;
+			XMM0	 = _mm_load_ps(vec+i   );
+			XMM2	 = _mm_load_ps(vec+i+ 8);
+			XMM4	 = _mm_load_ps(vec+i+ 4);
+			XMM5	 = _mm_load_ps(vec+i+12);
+			XMM1	 = XMM0;
+			XMM3	 = XMM2;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM4,_MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4,_MM_SHUFFLE(3,1,3,1));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5,_MM_SHUFFLE(2,0,2,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5,_MM_SHUFFLE(3,1,3,1));
+			XMM0	 = _mm_mul_ps(XMM0, XMM0);
+			XMM1	 = _mm_mul_ps(XMM1, XMM1);
+			XMM2	 = _mm_mul_ps(XMM2, XMM2);
+			XMM3	 = _mm_mul_ps(XMM3, XMM3);
+			XMM0	 = _mm_add_ps(XMM0, XMM1);
+			XMM2	 = _mm_add_ps(XMM2, XMM3);
+#endif
+			XMM0	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM0));
+			XMM2	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM2));
+			XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+			XMM2	 = _mm_mul_ps(XMM2, PM128(mparm));
+			XMM0	 = _mm_add_ps(XMM0, PM128(aparm));
+			XMM2	 = _mm_add_ps(XMM2, PM128(aparm));
+			XMM0	 = _mm_max_ps(XMM0, MINV);
+			XMM2	 = _mm_max_ps(XMM2, MINV);
+			_mm_store_ps(p  , XMM0);
+			_mm_store_ps(p+4, XMM2);
+		}
+#else	/* for __SSE2__ */
+/*
+		SSE optimized code
+*/
+		for(i=0;i<midpoint;i+=16,p+=8)
+		{
+			__m64	MM0, MM1, MM2, MM3;
+			__m128x	U0, U1;
+			{
+				__m128	XMM0, XMM2;
+				__m128	XMM1, XMM3;
+				__m128	XMM4, XMM5;
+				XMM0	 = _mm_load_ps(vec+i   );
+				XMM2	 = _mm_load_ps(vec+i+ 8);
+				XMM4	 = _mm_load_ps(vec+i+ 4);
+				XMM5	 = _mm_load_ps(vec+i+12);
+				XMM1	 = XMM0;
+				XMM3	 = XMM2;
+				XMM0	 = _mm_shuffle_ps(XMM0, XMM4,_MM_SHUFFLE(2,0,2,0));
+				XMM1	 = _mm_shuffle_ps(XMM1, XMM4,_MM_SHUFFLE(3,1,3,1));
+				XMM2	 = _mm_shuffle_ps(XMM2, XMM5,_MM_SHUFFLE(2,0,2,0));
+				XMM3	 = _mm_shuffle_ps(XMM3, XMM5,_MM_SHUFFLE(3,1,3,1));
+				XMM0	 = _mm_mul_ps(XMM0, XMM0);
+				XMM1	 = _mm_mul_ps(XMM1, XMM1);
+				XMM2	 = _mm_mul_ps(XMM2, XMM2);
+				XMM3	 = _mm_mul_ps(XMM3, XMM3);
+				XMM0	 = _mm_add_ps(XMM0, XMM1);
+				XMM2	 = _mm_add_ps(XMM2, XMM3);
+				U0.ps	 = XMM0;
+				U1.ps	 = XMM2;
+				MM0		 = U0.pi64[1];
+				MM1		 = U1.pi64[1];
+				MM2		 = U0.pi64[0];
+				MM3		 = U1.pi64[0];
+				XMM0	 = _mm_cvtpi32_ps(XMM0, MM0);
+				XMM2	 = _mm_cvtpi32_ps(XMM2, MM1);
+				XMM0	 = _mm_movelh_ps(XMM0, XMM0);
+				XMM2	 = _mm_movelh_ps(XMM2, XMM2);
+				XMM0	 = _mm_cvtpi32_ps(XMM0, MM2);
+				XMM2	 = _mm_cvtpi32_ps(XMM2, MM3);
+				XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+				XMM2	 = _mm_mul_ps(XMM2, PM128(mparm));
+				XMM0	 = _mm_add_ps(XMM0, PM128(aparm));
+				XMM2	 = _mm_add_ps(XMM2, PM128(aparm));
+				XMM0	 = _mm_max_ps(XMM0, DECAY0);
+				XMM2	 = _mm_max_ps(XMM2, DECAY1);
+				XMM0	 = _mm_max_ps(XMM0, MINV);
+				XMM2	 = _mm_max_ps(XMM2, MINV);
+				_mm_store_ps(p  , XMM0);
+				_mm_store_ps(p+4, XMM2);
+			}
+			DECAY0	 = _mm_sub_ps(DECAY0, PM128(p16));
+			DECAY1	 = _mm_sub_ps(DECAY1, PM128(p16));
+		}
+		for(;i<last_n;i+=16,p+=8)
+		{
+			__m64	MM0, MM1, MM2, MM3;
+			__m128x	U0, U1;
+			{
+				__m128	XMM0, XMM2;
+				__m128	XMM1, XMM3;
+				__m128	XMM4, XMM5;
+				XMM0	 = _mm_load_ps(vec+i   );
+				XMM2	 = _mm_load_ps(vec+i+ 8);
+				XMM4	 = _mm_load_ps(vec+i+ 4);
+				XMM5	 = _mm_load_ps(vec+i+12);
+				XMM1	 = XMM0;
+				XMM3	 = XMM2;
+				XMM0	 = _mm_shuffle_ps(XMM0, XMM4,_MM_SHUFFLE(2,0,2,0));
+				XMM1	 = _mm_shuffle_ps(XMM1, XMM4,_MM_SHUFFLE(3,1,3,1));
+				XMM2	 = _mm_shuffle_ps(XMM2, XMM5,_MM_SHUFFLE(2,0,2,0));
+				XMM3	 = _mm_shuffle_ps(XMM3, XMM5,_MM_SHUFFLE(3,1,3,1));
+				XMM0	 = _mm_mul_ps(XMM0, XMM0);
+				XMM1	 = _mm_mul_ps(XMM1, XMM1);
+				XMM2	 = _mm_mul_ps(XMM2, XMM2);
+				XMM3	 = _mm_mul_ps(XMM3, XMM3);
+				XMM0	 = _mm_add_ps(XMM0, XMM1);
+				XMM2	 = _mm_add_ps(XMM2, XMM3);
+				U0.ps	 = XMM0;
+				U1.ps	 = XMM2;
+				MM0		 = U0.pi64[1];
+				MM1		 = U1.pi64[1];
+				MM2		 = U0.pi64[0];
+				MM3		 = U1.pi64[0];
+				XMM0	 = _mm_cvtpi32_ps(XMM0, MM0);
+				XMM2	 = _mm_cvtpi32_ps(XMM2, MM1);
+				XMM0	 = _mm_movelh_ps(XMM0, XMM0);
+				XMM2	 = _mm_movelh_ps(XMM2, XMM2);
+				XMM0	 = _mm_cvtpi32_ps(XMM0, MM2);
+				XMM2	 = _mm_cvtpi32_ps(XMM2, MM3);
+				XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+				XMM2	 = _mm_mul_ps(XMM2, PM128(mparm));
+				XMM0	 = _mm_add_ps(XMM0, PM128(aparm));
+				XMM2	 = _mm_add_ps(XMM2, PM128(aparm));
+				XMM0	 = _mm_max_ps(XMM0, MINV);
+				XMM2	 = _mm_max_ps(XMM2, MINV);
+				_mm_store_ps(p  , XMM0);
+				_mm_store_ps(p+4, XMM2);
+			}
+		}
+		_mm_empty();
+#endif	/* for __SSE2__ */
+	}
+#else														/* SSE Optimize */
   for(i=0;i<n/2;i+=2){
     float val=vec[i]*vec[i]+vec[i+1]*vec[i+1];
     val=todB(&val)*.5f;
@@ -159,6 +436,7 @@ static int _ve_amp(envelope_lookup *ve,
     vec[i>>1]=val;
     decay-=8.;
   }
+#endif														/* SSE Optimize */
 
   /*_analysis_output_always("spread",seq2++,vec,n/4,0,0,0);*/
 
@@ -168,8 +446,80 @@ static int _ve_amp(envelope_lookup *ve,
     float valmax,valmin;
 
     /* accumulate amplitude */
+#ifdef	__SSE__                                     		/* SSE Optimize */
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3, XMM4, XMM5;
+		if(bands[j].end!=8)
+		{
+			switch(bands[j].end)
+			{
+				case 4 :	/* bands[j].end==4(33.333%) */
+					XMM0	 = _mm_lddqu_ps(vec+bands[j].begin);
+					XMM1	 = _mm_load_ps(bands[j].window  );
+					XMM0	 = _mm_mul_ps(XMM0, XMM1);
+					break;
+				case 5 :	/* bands[j].end==5(8.333%) */
+					XMM0	 = _mm_lddqu_ps(vec+bands[j].begin);
+					XMM2	 = _mm_load_ss(vec+bands[j].begin+4);
+					XMM1	 = _mm_load_ps(bands[j].window  );
+					XMM3	 = _mm_load_ss(bands[j].window+4);
+					XMM0	 = _mm_mul_ps(XMM0, XMM1);
+					XMM2	 = _mm_mul_ss(XMM2, XMM3);
+					XMM0	 = _mm_add_ss(XMM0, XMM2);
+					break;
+				case 6 :	/* bands[j].end==6(8.333%) */
+					XMM0	 = _mm_lddqu_ps(vec+bands[j].begin);
+					XMM2	 = _mm_load_ss(vec+bands[j].begin+4);
+					XMM4	 = _mm_load_ss(vec+bands[j].begin+5);
+					XMM1	 = _mm_load_ps(bands[j].window  );
+					XMM3	 = _mm_load_ss(bands[j].window+4);
+					XMM5	 = _mm_load_ss(bands[j].window+5);
+					XMM0	 = _mm_mul_ps(XMM0, XMM1);
+					XMM2	 = _mm_mul_ss(XMM2, XMM3);
+					XMM4	 = _mm_mul_ss(XMM4, XMM5);
+					XMM2	 = _mm_add_ss(XMM2, XMM4);
+					XMM0	 = _mm_add_ss(XMM0, XMM2);
+					break;
+				case 2 :	/* bands[j].end==2(8.333%) */
+					XMM0	 = _mm_load_ss(vec+bands[j].begin  );
+					XMM2	 = _mm_load_ss(vec+bands[j].begin+1);
+					XMM1	 = _mm_load_ss(bands[j].window  );
+					XMM3	 = _mm_load_ss(bands[j].window+1);
+					XMM0	 = _mm_mul_ss(XMM0, XMM1);
+					XMM2	 = _mm_mul_ss(XMM2, XMM3);
+					XMM0	 = _mm_add_ss(XMM0, XMM2);
+					break;
+				case 3 :	/* bands[j].end==3(8.333%) */
+					XMM0	 = _mm_load_ss(vec+bands[j].begin  );
+					XMM2	 = _mm_load_ss(vec+bands[j].begin+1);
+					XMM4	 = _mm_load_ss(vec+bands[j].begin+2);
+					XMM1	 = _mm_load_ss(bands[j].window  );
+					XMM3	 = _mm_load_ss(bands[j].window+1);
+					XMM5	 = _mm_load_ss(bands[j].window+2);
+					XMM0	 = _mm_mul_ss(XMM0, XMM1);
+					XMM2	 = _mm_mul_ss(XMM2, XMM3);
+					XMM4	 = _mm_mul_ss(XMM4, XMM5);
+					XMM2	 = _mm_add_ss(XMM2, XMM4);
+					XMM0	 = _mm_add_ss(XMM0, XMM2);
+					break;
+			}
+		}
+		else	/* bands[j].end==8(33.333%) */
+		{
+			XMM0	 = _mm_lddqu_ps(vec+bands[j].begin  );
+			XMM1	 = _mm_load_ps(bands[j].window  );
+			XMM2	 = _mm_lddqu_ps(vec+bands[j].begin+4);
+			XMM3	 = _mm_load_ps(bands[j].window+4);
+			XMM0	 = _mm_mul_ps(XMM0, XMM1);
+			XMM2	 = _mm_mul_ps(XMM2, XMM3);
+			XMM0	 = _mm_add_ps(XMM0, XMM2);
+		}
+		acc		 = _mm_add_horz(XMM0);
+	}
+#else														/* SSE Optimize */
     for(i=0;i<bands[j].end;i++)
       acc+=vec[i+bands[j].begin]*bands[j].window[i];
+#endif														/* SSE Optimize */
 
     acc*=bands[j].total;
 

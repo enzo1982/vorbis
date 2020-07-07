@@ -19,8 +19,15 @@
 #include "os.h"
 #include "misc.h"
 #include "window.h"
+#ifdef __SSE__												/* SSE Optimize */
+#include "xmmlib.h"
+#endif														/* SSE Optimize */
 
+#ifdef __SSE__												/* SSE Optimize */
+static _MM_ALIGN16 const float vwin64[32] = {
+#else														/* SSE Optimize */
 static const float vwin64[32] = {
+#endif														/* SSE Optimize */
   0.0009460463F, 0.0085006468F, 0.0235352254F, 0.0458950567F,
   0.0753351908F, 0.1115073077F, 0.1539457973F, 0.2020557475F,
   0.2551056759F, 0.3122276645F, 0.3724270287F, 0.4346027792F,
@@ -31,7 +38,11 @@ static const float vwin64[32] = {
   0.9989462667F, 0.9997230082F, 0.9999638688F, 0.9999995525F,
 };
 
+#ifdef __SSE__												/* SSE Optimize */
+static _MM_ALIGN16 const float vwin128[64] = {
+#else														/* SSE Optimize */
 static const float vwin128[64] = {
+#endif														/* SSE Optimize */
   0.0002365472F, 0.0021280687F, 0.0059065254F, 0.0115626550F,
   0.0190823442F, 0.0284463735F, 0.0396300935F, 0.0526030430F,
   0.0673285281F, 0.0837631763F, 0.1018564887F, 0.1215504095F,
@@ -50,7 +61,11 @@ static const float vwin128[64] = {
   0.9999331503F, 0.9999825563F, 0.9999977357F, 0.9999999720F,
 };
 
+#ifdef __SSE__												/* SSE Optimize */
+static _MM_ALIGN16 const float vwin256[128] = {
+#else														/* SSE Optimize */
 static const float vwin256[128] = {
+#endif														/* SSE Optimize */
   0.0000591390F, 0.0005321979F, 0.0014780301F, 0.0028960636F,
   0.0047854363F, 0.0071449926F, 0.0099732775F, 0.0132685298F,
   0.0170286741F, 0.0212513119F, 0.0259337111F, 0.0310727950F,
@@ -85,7 +100,11 @@ static const float vwin256[128] = {
   0.9999958064F, 0.9999989077F, 0.9999998584F, 0.9999999983F,
 };
 
+#ifdef __SSE__												/* SSE Optimize */
+static _MM_ALIGN16 const float vwin512[256] = {
+#else														/* SSE Optimize */
 static const float vwin512[256] = {
+#endif														/* SSE Optimize */
   0.0000147849F, 0.0001330607F, 0.0003695946F, 0.0007243509F,
   0.0011972759F, 0.0017882983F, 0.0024973285F, 0.0033242588F,
   0.0042689632F, 0.0053312973F, 0.0065110982F, 0.0078081841F,
@@ -152,7 +171,11 @@ static const float vwin512[256] = {
   0.9999997377F, 0.9999999317F, 0.9999999911F, 0.9999999999F,
 };
 
+#ifdef __SSE__												/* SSE Optimize */
+static _MM_ALIGN16 const float vwin1024[512] = {
+#else														/* SSE Optimize */
 static const float vwin1024[512] = {
+#endif														/* SSE Optimize */
   0.0000036962F, 0.0000332659F, 0.0000924041F, 0.0001811086F,
   0.0002993761F, 0.0004472021F, 0.0006245811F, 0.0008315063F,
   0.0010679699F, 0.0013339631F, 0.0016294757F, 0.0019544965F,
@@ -283,7 +306,11 @@ static const float vwin1024[512] = {
   0.9999999836F, 0.9999999957F, 0.9999999994F, 1.0000000000F,
 };
 
+#ifdef __SSE__												/* SSE Optimize */
+static _MM_ALIGN16 const float vwin2048[1024] = {
+#else														/* SSE Optimize */
 static const float vwin2048[1024] = {
+#endif														/* SSE Optimize */
   0.0000009241F, 0.0000083165F, 0.0000231014F, 0.0000452785F,
   0.0000748476F, 0.0001118085F, 0.0001561608F, 0.0002079041F,
   0.0002670379F, 0.0003335617F, 0.0004074748F, 0.0004887765F,
@@ -542,7 +569,11 @@ static const float vwin2048[1024] = {
   0.9999999990F, 0.9999999997F, 1.0000000000F, 1.0000000000F,
 };
 
+#ifdef __SSE__												/* SSE Optimize */
+static _MM_ALIGN16 const float vwin4096[2048] = {
+#else														/* SSE Optimize */
 static const float vwin4096[2048] = {
+#endif														/* SSE Optimize */
   0.0000002310F, 0.0000020791F, 0.0000057754F, 0.0000113197F,
   0.0000187121F, 0.0000279526F, 0.0000390412F, 0.0000519777F,
   0.0000667623F, 0.0000833949F, 0.0001018753F, 0.0001222036F,
@@ -1057,7 +1088,11 @@ static const float vwin4096[2048] = {
   0.9999999999F, 1.0000000000F, 1.0000000000F, 1.0000000000F,
 };
 
+#ifdef __SSE__												/* SSE Optimize */
+static _MM_ALIGN16 const float vwin8192[4096] = {
+#else														/* SSE Optimize */
 static const float vwin8192[4096] = {
+#endif														/* SSE Optimize */
   0.0000000578F, 0.0000005198F, 0.0000014438F, 0.0000028299F,
   0.0000046780F, 0.0000069882F, 0.0000097604F, 0.0000129945F,
   0.0000166908F, 0.0000208490F, 0.0000254692F, 0.0000305515F,
@@ -2120,6 +2155,96 @@ void _vorbis_apply_window(float *d,int *winno,long *blocksizes,
 
     int i,p;
 
+#ifdef __SSE__												/* SSE Optimize */
+	if(leftbegin>0)
+	{
+		__m128	XMM0	 = _mm_setzero_ps();
+		__m128	XMM1	 = _mm_setzero_ps();
+		__m128	XMM2	 = _mm_setzero_ps();
+		__m128	XMM3	 = _mm_setzero_ps();
+		for(i=0;i<leftbegin;i+=32)
+		{
+			_mm_store_ps(d+i   ,XMM0);
+			_mm_store_ps(d+i+ 4,XMM1);
+			_mm_store_ps(d+i+ 8,XMM2);
+			_mm_store_ps(d+i+12,XMM3);
+			_mm_store_ps(d+i+16,XMM0);
+			_mm_store_ps(d+i+20,XMM1);
+			_mm_store_ps(d+i+24,XMM2);
+			_mm_store_ps(d+i+28,XMM3);
+		}
+	}
+	_mm_prefetch(windowLW   , _MM_HINT_NTA);
+	_mm_prefetch(windowLW+32, _MM_HINT_NTA);
+	for(i=leftbegin,p=0;i<leftend;i+=16,p+=16)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3;
+		__m128	XMM4, XMM5, XMM6, XMM7;
+		_mm_prefetch(windowLW+p+64, _MM_HINT_NTA);
+		XMM0	 = _mm_load_ps(d+i   );
+		XMM4	 = _mm_load_ps(windowLW+p   );
+		XMM1	 = _mm_load_ps(d+i+ 4);
+		XMM5	 = _mm_load_ps(windowLW+p+ 4);
+		XMM2	 = _mm_load_ps(d+i+ 8);
+		XMM6	 = _mm_load_ps(windowLW+p+ 8);
+		XMM3	 = _mm_load_ps(d+i+12);
+		XMM7	 = _mm_load_ps(windowLW+p+12);
+		XMM0	 = _mm_mul_ps(XMM0, XMM4);
+		XMM1	 = _mm_mul_ps(XMM1, XMM5);
+		XMM2	 = _mm_mul_ps(XMM2, XMM6);
+		XMM3	 = _mm_mul_ps(XMM3, XMM7);
+		_mm_store_ps(d+i   ,XMM0);
+		_mm_store_ps(d+i+ 4,XMM1);
+		_mm_store_ps(d+i+ 8,XMM2);
+		_mm_store_ps(d+i+12,XMM3);
+	}
+	p	 = rn/2-16;
+	_mm_prefetch(windowLW+p-16, _MM_HINT_NTA);
+	_mm_prefetch(windowLW+p-48, _MM_HINT_NTA);
+	for(i=rightbegin;i<rightend;i+=16,p-=16)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3,XMM4, XMM5, XMM6, XMM7;
+		_mm_prefetch(windowLW+p-80, _MM_HINT_NTA);
+		XMM0	 = _mm_load_ps(windowNW+p+12);
+		XMM1	 = _mm_load_ps(windowNW+p+ 8);
+		XMM2	 = _mm_load_ps(windowNW+p+ 4);
+		XMM3	 = _mm_load_ps(windowNW+p   );
+		XMM4	 = _mm_load_ps(d+i   );
+		XMM5	 = _mm_load_ps(d+i+ 4);
+		XMM6	 = _mm_load_ps(d+i+ 8);
+		XMM7	 = _mm_load_ps(d+i+12);
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM0, _MM_SHUFFLE(0,1,2,3));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM1, _MM_SHUFFLE(0,1,2,3));
+		XMM2	 = _mm_shuffle_ps(XMM2, XMM2, _MM_SHUFFLE(0,1,2,3));
+		XMM3	 = _mm_shuffle_ps(XMM3, XMM3, _MM_SHUFFLE(0,1,2,3));
+		XMM4	 = _mm_mul_ps(XMM4, XMM0);
+		XMM5	 = _mm_mul_ps(XMM5, XMM1);
+		XMM6	 = _mm_mul_ps(XMM6, XMM2);
+		XMM7	 = _mm_mul_ps(XMM7, XMM3);
+		_mm_store_ps(d+i   ,XMM4);
+		_mm_store_ps(d+i+ 4,XMM5);
+		_mm_store_ps(d+i+ 8,XMM6);
+		_mm_store_ps(d+i+12,XMM7);
+	}
+	if(i<n)
+	{
+		__m128	XMM0	 = _mm_setzero_ps();
+		__m128	XMM1	 = _mm_setzero_ps();
+		__m128	XMM2	 = _mm_setzero_ps();
+		__m128	XMM3	 = _mm_setzero_ps();
+		for(;i<n;i+=32)
+		{
+			_mm_store_ps(d+i   ,XMM0);
+			_mm_store_ps(d+i+ 4,XMM1);
+			_mm_store_ps(d+i+ 8,XMM2);
+			_mm_store_ps(d+i+12,XMM3);
+			_mm_store_ps(d+i+16,XMM0);
+			_mm_store_ps(d+i+20,XMM1);
+			_mm_store_ps(d+i+24,XMM2);
+			_mm_store_ps(d+i+28,XMM3);
+		}
+	}
+#else														/* SSE Optimize */
     for(i=0;i<leftbegin;i++)
       d[i]=0.f;
 
@@ -2131,5 +2256,6 @@ void _vorbis_apply_window(float *d,int *winno,long *blocksizes,
 
     for(;i<n;i++)
       d[i]=0.f;
+#endif														/* SSE Optimize */
   }
 }

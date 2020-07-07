@@ -24,6 +24,9 @@
 #include "codebook.h"
 #include "misc.h"
 #include "scales.h"
+#ifdef __SSE__												/* SSE Optimize */
+#include "xmmlib.h"
+#endif														/* SSE Optimize */
 
 #include <stdio.h>
 
@@ -270,11 +273,29 @@ static int render_point(int x0,int x1,int y0,int y1,int x){
   }
 }
 
+#if	defined(__SSE__)										/* SSE Optimize */
+static _MM_ALIGN16 const float pfv0[4]	 = 
+	{7.3142857f, 7.3142857f, 7.3142857f, 7.3142857f};
+static _MM_ALIGN16 const float pfv1[4]	 = 
+	{1023.5f, 1023.5f, 1023.5f, 1023.5f};
+static _MM_ALIGN16 const float pfv2[4]	 = 
+	{1023.f, 1023.f, 1023.f, 1023.f};
+#endif														/* SSE Optimize */
+
 static int vorbis_dBquant(const float *x){
+#if	defined(__SSE__)										/* SSE Optimize */
+	__m128	XMM0	 = _mm_load_ss(x);
+	XMM0	 = _mm_mul_ss(XMM0, PM128(pfv0));
+	XMM0	 = _mm_add_ss(XMM0, PM128(pfv1));
+	XMM0	 = _mm_max_ss(XMM0, PM128(PFV_0));
+	XMM0	 = _mm_min_ss(XMM0, PM128(pfv2));
+	return	_mm_cvttss_si32(XMM0);
+#else														/* SSE Optimize */
   int i= *x*7.3142857f+1023.5f;
   if(i>1023)return(1023);
   if(i<0)return(0);
   return i;
+#endif														/* SSE Optimize */
 }
 
 static const float FLOOR1_fromdB_LOOKUP[256]={

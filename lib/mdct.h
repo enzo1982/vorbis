@@ -57,6 +57,16 @@ typedef struct {
   int log2n;
 
   DATA_TYPE *trig;
+#ifdef __SSE__												/* SSE Optimize */
+  DATA_TYPE *trig_bitreverse;
+  DATA_TYPE *trig_forward;
+  DATA_TYPE *trig_backward;
+  DATA_TYPE *trig_butterfly_first;
+  DATA_TYPE *trig_butterfly_generic8;
+  DATA_TYPE *trig_butterfly_generic16;
+  DATA_TYPE *trig_butterfly_generic32;
+  DATA_TYPE *trig_butterfly_generic64;
+#endif														/* SSE Optimize */
   int       *bitrev;
 
   DATA_TYPE scale;
@@ -64,7 +74,11 @@ typedef struct {
 
 extern void mdct_init(mdct_lookup *lookup,int n);
 extern void mdct_clear(mdct_lookup *l);
+#ifdef __SSE__												/* SSE Optimize */
+extern void mdct_forward(mdct_lookup *init, DATA_TYPE *in, DATA_TYPE *out/*, DATA_TYPE *out1*/);
+#else														/* SSE Optimize */
 extern void mdct_forward(mdct_lookup *init, DATA_TYPE *in, DATA_TYPE *out);
+#endif														/* SSE Optimize */
 extern void mdct_backward(mdct_lookup *init, DATA_TYPE *in, DATA_TYPE *out);
 
 #endif

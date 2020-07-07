@@ -19,6 +19,9 @@
 #include <string.h>
 #include "vorbis/codec.h"
 #include "codec_internal.h"
+#ifdef __SSE__												/* SSE Optimize */
+#include "xmmlib.h"
+#endif														/* SSE Optimize */
 
 #include "masking.h"
 #include "psy.h"
@@ -106,6 +109,14 @@ static const aotuv_preset set_aotuv_psy[12]={
   {  720, .9f,   696,     608}, // 44.1 long(N=1024)  13953.515625
   { 1440, .9f,  1392,    1216}  // 44.1 long(N=2048)
 };
+
+#ifdef __SSE__												/* SSE Optimize */
+static _MM_ALIGN16 const float PNEGINF[4] = {NEGINF, NEGINF, NEGINF, NEGINF};
+
+_MM_ALIGN16 float findex[2048];
+_MM_ALIGN16 float findex2[2048];
+
+#endif														/* SSE Optimize */
 
 vorbis_look_psy_global *_vp_global_look(vorbis_info *vi){
   codec_setup_info *ci=vi->codec_setup;
@@ -502,6 +513,66 @@ void _vp_psy_init(vorbis_look_psy *p,vorbis_info_psy *vi,
     _analysis_output_always("noiseoff2",ls++,p->noiseoffset[2],n,1,0,0);
   }
 #endif
+#ifdef __SSE__												/* SSE Optimize */
+	if(findex[1]==0.f)
+	{
+		for(i=0;i<2048;i++)
+		{
+			findex[i]	 = (float)(i);
+			findex2[i]	 = (float)(i*i);
+		}
+	}
+	{
+		short* sb = (short*)p->bark;
+		for(i=0;i<n;i++)
+		{
+			if(sb[i*2+1]>=0)
+				break;
+		}
+		p->midpoint1	 = i;
+		p->midpoint1_4	 = p->midpoint1&(~3);
+		p->midpoint1_8	 = p->midpoint1_4&(~7);
+		p->midpoint1_16	 = p->midpoint1_8&(~15);
+		for(;i<n;i++)
+		{
+			if(sb[i*2]>=n)
+				break;
+		}
+		p->midpoint2	 = i;
+		i = (p->midpoint1+3)&(~3);
+		p->midpoint2_4	 = (p->midpoint2-i)&(~3);
+		p->midpoint2_8	 = p->midpoint2_4&(~7);
+		p->midpoint2_16	 = p->midpoint2_8&(~15);
+		p->midpoint2_4	+= i;
+		p->midpoint2_8	+= i;
+		p->midpoint2_16	+= i;
+	}
+	p->octsft=_ogg_malloc(n*sizeof(*p->octsft));
+	p->octend=_ogg_malloc(n*sizeof(*p->octend));
+	p->octpos=_ogg_malloc(n*sizeof(*p->octpos));
+	for(i=0;i<n;i++)
+	{
+		long oc	 = p->octave[i];
+		oc	 = oc>>p->shiftoc;
+
+		if(oc>=P_BANDS)oc=P_BANDS-1;
+		if(oc<0)oc=0;
+		
+		p->octsft[i]	 = oc;
+		p->octpos[i]	 = ((p->octave[i]+p->octave[i+1])>>1)-p->firstoc;
+
+	}
+	for(i=0;i<n;i++)
+	{
+		long oc=p->octave[i];
+		long j = i, k;
+		while(i+1<n && p->octave[i+1]==oc){
+			i++;
+		}
+		for(k=j;k<=i;k++)
+			p->octend[k] = i;
+	}
+#endif														/* SSE Optimize */
 }
 
 void _vp_psy_clear(vorbis_look_psy *p){
@@ -528,6 +599,11 @@ void _vp_psy_clear(vorbis_look_psy *p){
     if(p->ntfix_noiseoffset){
       _ogg_free(p->ntfix_noiseoffset);
     }
+#ifdef __SSE__												/* SSE Optimize */
+    if(p->octsft)_ogg_free(p->octsft);
+    if(p->octend)_ogg_free(p->octend);
+    if(p->octpos)_ogg_free(p->octpos);
+#endif														/* SSE Optimize */
     memset(p,0,sizeof(*p));
   }
 }
@@ -581,6 +657,9 @@ static void seed_curve(float *seed,
   int i,post1;
   int seedptr;
   const float *posts,*curve;
+#ifdef __SSE__												/* SSE Optimize */
+	__m128	SAMP	 = _mm_load_ss(&amp);
+#endif														/* SSE Optimize */
 
   int choice=(int)((amp+dBoffset-P_LEVEL_0)*.1f);
   choice=max(choice,0);
@@ -590,6 +669,42 @@ static void seed_curve(float *seed,
   post1=(int)posts[1];
   seedptr=oc+(posts[0]-EHMER_OFFSET)*linesper-(linesper>>1);
 
+#ifdef __SSE__												/* SSE Optimize */
+	i	 = posts[0];
+	if(seedptr<0)
+	{
+		int preseedptr	 = seedptr;
+		seedptr	 = (8-((-seedptr)&7));
+		i	+= ((seedptr-preseedptr)>>3);
+	}
+	if((post1-i)*8+seedptr>=n)
+		post1	 = (n-1-seedptr)/8+i+1;
+	{
+		int post05	 = ((post1-i)&(~1))+i;
+		for(;i<post05;i+=2)
+		{
+			__m128	XMM0	 = _mm_load_ss(curve+i  );
+			__m128	XMM1	 = _mm_load_ss(curve+i+1);
+			__m128	XMM2	 = _mm_load_ss(seed+seedptr   );
+			__m128	XMM3	 = _mm_load_ss(seed+seedptr+ 8);
+			XMM0	 = _mm_add_ss(XMM0, SAMP);
+			XMM1	 = _mm_add_ss(XMM1, SAMP);
+			XMM0	 = _mm_max_ss(XMM0, XMM2);
+			XMM1	 = _mm_max_ss(XMM1, XMM3);
+			_mm_store_ss(seed+seedptr   , XMM0);
+			_mm_store_ss(seed+seedptr+ 8, XMM1);
+			seedptr	+= 16;
+		}
+		if(post1!=i)
+		{
+			__m128	XMM0	 = _mm_load_ss(curve+i  );
+			__m128	XMM2	 = _mm_load_ss(seed+seedptr   );
+			XMM0	 = _mm_add_ss(XMM0, SAMP);
+			XMM0	 = _mm_max_ss(XMM0, XMM2);
+			_mm_store_ss(seed+seedptr   , XMM0);
+		}
+	}
+#else														/* SSE Optimize */
   for(i=posts[0];i<post1;i++){
     if(seedptr>0){
       float lin=amp+curve[i];
@@ -598,6 +713,7 @@ static void seed_curve(float *seed,
     seedptr+=linesper;
     if(seedptr>=n)break;
   }
+#endif														/* SSE Optimize */
 }
 
 static void seed_loop(const vorbis_look_psy *p,
@@ -614,6 +730,22 @@ static void seed_loop(const vorbis_look_psy *p,
 
   for(i=0;i<n;i++){
     float max=f[i];
+#ifdef __SSE__												/* SSE Optimize */
+	long	oc;
+	long	ei=p->octend[i];
+	if(i>ei)
+		continue;
+	oc	 = p->octave[i];
+	while(i<ei)
+	{
+		i++;
+		if(f[i]>max)max	 = f[i];
+	}
+	
+	if(max+6.f>flr[i])
+	{
+		oc	 = p->octsft[i];
+#else
     long oc=p->octave[i];
     while(i+1<n && p->octave[i+1]==oc){
       i++;
@@ -625,6 +757,7 @@ static void seed_loop(const vorbis_look_psy *p,
 
       if(oc>=P_BANDS)oc=P_BANDS-1;
       if(oc<0)oc=0;
+#endif
 
       seed_curve(seed,
                  curves[oc],
@@ -642,6 +775,80 @@ static void seed_chase(float *seeds, const int linesper, const long n){
   float *ampstack=alloca(n*sizeof(*ampstack));
   long   stack=0;
   long   pos=0;
+#ifdef __SSE__												/* SSE Optimize */
+  long   i=0;
+
+	for(;i<n;i++)
+	{
+		if(stack<2)
+		{
+			posstack[stack]=i;
+			ampstack[stack++]=seeds[i];
+		}
+		else
+		{
+			while(1)
+			{
+				if(seeds[i]<ampstack[stack-1])
+				{
+					posstack[stack]=i;
+					ampstack[stack++]=seeds[i];
+					break;
+				}
+				else
+				{
+					if(i<posstack[stack-1]+linesper)
+					{
+						if(stack>1 && ampstack[stack-1]<=ampstack[stack-2] && i<posstack[stack-2]+linesper)
+						{
+							/* we completely overlap, making stack-1 irrelevant.  pop it */
+							stack--;
+LOOP_WITH_CHECK_STACK:
+							continue;
+						}
+					}
+					posstack[stack]=i;
+					ampstack[stack++]=seeds[i];
+					break;
+				}
+			}
+			i	++;
+			break;
+		}
+	}
+	for(;i<n;i++)
+	{
+		while(1)
+		{
+			if(seeds[i]<ampstack[stack-1])
+			{
+				posstack[stack]=i;
+				ampstack[stack++]=seeds[i];
+				break;
+			}
+			else
+			{
+				if(i<posstack[stack-1]+linesper)
+				{
+					if(ampstack[stack-1]<=ampstack[stack-2] && i<posstack[stack-2]+linesper)
+					{
+						/* we completely overlap, making stack-1 irrelevant.  pop it */
+						stack--;
+						if(stack<2)
+						{
+							goto LOOP_WITH_CHECK_STACK;
+						}
+						else
+							continue;
+					}
+				}
+				posstack[stack]=i;
+				ampstack[stack++]=seeds[i];
+				break;
+			}
+		}
+	}
+#else														/* SSE Optimize */
   long   i;
 
   for(i=0;i<n;i++){
@@ -671,10 +878,40 @@ static void seed_chase(float *seeds, const int linesper, const long n){
       }
     }
   }
+#endif														/* SSE Optimize */
 
   /* the stack now contains only the positions that are relevant. Scan
      'em straight through */
 
+#ifdef __SSE__												/* SSE Optimize */
+	for(i=0;i<stack-1;i++)
+	{
+		long endpos;
+		if(ampstack[i+1]>ampstack[i])
+		{
+			endpos	 = posstack[i+1];
+		}
+		else
+		{
+			endpos	 = posstack[i]+linesper+1; /* +1 is important, else bin 0 is
+					discarded in short frames */
+		}
+		if(endpos>n)
+			endpos	 = n;
+		for(;pos<endpos;pos++)
+			seeds[pos]=ampstack[i];
+	}
+	if(i<stack)
+	{
+		long endpos;
+		endpos	 = posstack[i]+linesper+1; /* +1 is important, else bin 0 is
+				discarded in short frames */
+		if(endpos>n)
+			endpos	 = n;
+		for(;pos<endpos;pos++)
+			seeds[pos]=ampstack[i];
+	}
+#else														/* SSE Optimize */
   for(i=0;i<stack;i++){
     long endpos;
     if(i<stack-1 && ampstack[i+1]>ampstack[i]){
@@ -687,6 +924,7 @@ static void seed_chase(float *seeds, const int linesper, const long n){
     for(;pos<endpos;pos++)
       seeds[pos]=ampstack[i];
   }
+#endif														/* SSE Optimize */
 
   /* there.  Linear time.  I now remember this was on a problem set I
      had in Grad Skool... I didn't solve it at the time ;-) */
@@ -698,6 +936,121 @@ static void seed_chase(float *seeds, const int linesper, const long n){
 static void max_seeds(const vorbis_look_psy *p,
                       float *seed,
                       float *flr){
+#ifdef __SSE__												/* SSE Optimize */
+	long	n	 = p->total_octave_lines;
+	int		linesper	 = p->eighth_octave_lines;
+	long	linpos	 = 0;
+	long	pos;
+	float*	TEMP	 = (float*)_ogg_alloca(sizeof(float)*p->n);
+	
+	seed_chase(seed,linesper,n); /* for masking */
+	{
+		__m128	PVAL	 = _mm_set_ps1(p->vi->tone_abs_limit);
+		long ln	 = n&(~15);
+		for(pos=0;pos<ln;pos+=16)
+		{
+			__m128	XMM0	 = _mm_load_ps(seed+pos   );
+			__m128	XMM1	 = _mm_load_ps(seed+pos+ 4);
+			__m128	XMM2	 = _mm_load_ps(seed+pos+ 8);
+			__m128	XMM3	 = _mm_load_ps(seed+pos+12);
+			XMM0	 = _mm_min_ps(XMM0, PVAL);
+			XMM1	 = _mm_min_ps(XMM1, PVAL);
+			XMM2	 = _mm_min_ps(XMM2, PVAL);
+			XMM3	 = _mm_min_ps(XMM3, PVAL);
+			_mm_store_ps(seed+pos   , XMM0);
+			_mm_store_ps(seed+pos+ 4, XMM1);
+			_mm_store_ps(seed+pos+ 8, XMM2);
+			_mm_store_ps(seed+pos+12, XMM3);
+		}
+		ln	 = n&(~7);
+		for(;pos<ln;pos+=8)
+		{
+			__m128	XMM0	 = _mm_load_ps(seed+pos   );
+			__m128	XMM1	 = _mm_load_ps(seed+pos+ 4);
+			XMM0	 = _mm_min_ps(XMM0, PVAL);
+			XMM1	 = _mm_min_ps(XMM1, PVAL);
+			_mm_store_ps(seed+pos   , XMM0);
+			_mm_store_ps(seed+pos+ 4, XMM1);
+		}
+		ln	 = n&(~3);
+		for(;pos<ln;pos+=4)
+		{
+			__m128	XMM0	 = _mm_load_ps(seed+pos   );
+			XMM0	 = _mm_min_ps(XMM0, PVAL);
+			_mm_store_ps(seed+pos   , XMM0);
+		}
+		for(;pos<n;pos++)
+		{
+			__m128	XMM0	 = _mm_load_ss(seed+pos   );
+			XMM0	 = _mm_min_ss(XMM0, PVAL);
+			_mm_store_ss(seed+pos, XMM0);
+		}
+	}
+	pos	 = p->octave[0]-p->firstoc-(linesper>>1);
+	if(linpos+1<p->n)
+	{
+		float minV	 = seed[pos];
+		long end	 = p->octpos[linpos];
+		while(pos+1<=end)
+		{
+			pos	++;
+			if((seed[pos]>NEGINF && seed[pos]<minV) || minV==NEGINF)
+				minV	 = seed[pos];
+		}
+		end	 = pos+p->firstoc;
+		for(;linpos<p->n&&p->octave[linpos]<=end;)
+		{
+			int ep = p->octend[linpos];
+			for(;linpos<=ep;linpos++)
+				TEMP[linpos]	 = minV;
+		}
+	}
+	while(linpos+1<p->n)
+	{
+		float minV	 = seed[pos];
+		long end	 = p->octpos[linpos];
+		while(pos+1<=end)
+		{
+			pos	++;
+			if(seed[pos]<minV)
+				minV	 = seed[pos];
+		}
+		end	 = pos+p->firstoc;
+		for(;linpos<p->n&&p->octave[linpos]<=end;)
+		{
+			int ep = p->octend[linpos];
+			for(;linpos<=ep;linpos++)
+				TEMP[linpos]	 = minV;
+		}
+	}
+	
+	{
+		float minV	 = seed[p->total_octave_lines-1];
+		for(;linpos<p->n;linpos++)
+			TEMP[linpos]	 = minV;
+	}
+	{
+		for(pos=0;pos<p->n;pos+=16)
+		{
+			__m128	XMM0	 = _mm_load_ps(flr+pos    );
+			__m128	XMM4	 = _mm_load_ps(TEMP+pos   );
+			__m128	XMM1	 = _mm_load_ps(flr+pos+  4);
+			__m128	XMM5	 = _mm_load_ps(TEMP+pos+ 4);
+			__m128	XMM2	 = _mm_load_ps(flr+pos+  8);
+			__m128	XMM6	 = _mm_load_ps(TEMP+pos+ 8);
+			__m128	XMM3	 = _mm_load_ps(flr+pos+ 12);
+			__m128	XMM7	 = _mm_load_ps(TEMP+pos+12);
+			XMM0	 = _mm_max_ps(XMM0, XMM4);
+			XMM1	 = _mm_max_ps(XMM1, XMM5);
+			XMM2	 = _mm_max_ps(XMM2, XMM6);
+			XMM3	 = _mm_max_ps(XMM3, XMM7);
+			_mm_store_ps(flr+pos   , XMM0);
+			_mm_store_ps(flr+pos+ 4, XMM1);
+			_mm_store_ps(flr+pos+ 8, XMM2);
+			_mm_store_ps(flr+pos+12, XMM3);
+		}
+	}
+#else														/* SSE Optimize */
   long   n=p->total_octave_lines;
   int    linesper=p->eighth_octave_lines;
   long   linpos=0;
@@ -728,8 +1081,2402 @@ static void max_seeds(const vorbis_look_psy *p,
       if(flr[linpos]<minV)flr[linpos]=minV;
   }
 
+#endif														/* SSE Optimize */
 }
 
+#ifdef __SSE__												/* SSE Optimize */
+/*
+	A	 = tY * tXX - tX * tXY;
+	B	 = tN * tXY - tX * tY;
+	D	 = tN * tXX - tX * tX;
+	R	 = (A + x * B) / D;
+
+	Input
+	TN		(N3 ,N2 ,N1 ,N0 )
+	XMM0	 = (XY0,Y0 ,XX0,X0 )
+	XMM1	 = (XY1,Y1 ,XX1,X1 )
+	XMM4	 = (XY2,Y2 ,XX2,X2 )
+	XMM3	 = (XY3,Y3 ,XX3,X3 )
+
+	Phase 1.
+
+	Phase 2.
+	XMM0	 = 	(X3 ,X2 ,X1 ,X0 )
+	XMM1	 = 	(XX3,XX2,XX1,XX0)
+	XMM2	 = 	(Y3 ,Y2 ,Y1 ,Y0 )
+	XMM3	 = 	(XY3,XY2,XY1,XY0)
+
+	Phase 3.
+	XMM4	 = Y*XX
+	XMM5	 = X*XY
+	XMM6	 = XY*TN
+	XMM7	 = X*Y
+
+	Phase 4.
+	XMM4	 = Y*XX - X*XY	... A
+	XMM5	 = XY*TN - X*Y	... B
+	XMM6	 = XX*TN
+	XMM7	 = X*X
+	XMM1	 = XX*TN - X*X	... D
+	
+	Phase 5.
+	XMM4	 = PX*B
+	XMM4	 = PX*B+A
+	XMM4	 = (A+PX*B)/D
+*/
+#define bark_noise_hybridmp_SSE_SUBC()										\
+{																			\
+	__m128 XMM2, XMM5, XMM6, XMM7;											\
+	XMM2 = XMM0;															\
+	XMM5 = XMM4;															\
+	XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(1,0,1,0));			\
+	XMM2	 = _mm_shuffle_ps(XMM2, XMM1, _MM_SHUFFLE(3,2,3,2));			\
+	XMM4	 = _mm_shuffle_ps(XMM4, XMM3, _MM_SHUFFLE(1,0,1,0));			\
+	XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(3,2,3,2));			\
+	XMM1 = XMM0;															\
+	XMM3 = XMM2;															\
+	XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));			\
+	XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(3,1,3,1));			\
+	XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(2,0,2,0));			\
+	XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(3,1,3,1));			\
+	XMM4 = XMM2;															\
+	XMM5 = XMM0;															\
+	XMM6 = XMM3;															\
+	XMM7 = XMM0;															\
+	XMM4 = _mm_mul_ps(XMM4, XMM1);											\
+	XMM5 = _mm_mul_ps(XMM5, XMM3);											\
+	XMM3 = _mm_load_ps(findex+i);											\
+	XMM6 = _mm_mul_ps(XMM6, TN.ps);											\
+	XMM1 = _mm_mul_ps(XMM1, TN.ps);											\
+	XMM7 = _mm_mul_ps(XMM7, XMM2);											\
+	XMM0 = _mm_mul_ps(XMM0, XMM0);											\
+	XMM4 = _mm_sub_ps(XMM4, XMM5);											\
+	XMM6 = _mm_sub_ps(XMM6, XMM7);											\
+	XMM1 = _mm_sub_ps(XMM1, XMM0);											\
+	XMM6 = _mm_mul_ps(XMM6, XMM3);											\
+	XMM3 = _mm_rcp_ps(XMM1);												\
+	XMM4 = _mm_add_ps(XMM4, XMM6);											\
+	XMM1 = _mm_mul_ps(XMM1, XMM3);											\
+	XMM1 = _mm_mul_ps(XMM1, XMM3);											\
+	XMM3 = _mm_add_ps(XMM3, XMM3);											\
+	XMM3 = _mm_sub_ps(XMM3, XMM1);											\
+	XMM4 = _mm_mul_ps(XMM4, XMM3);											\
+}
+#define bark_noise_hybridmp_SSE_SUBC2()										\
+{																			\
+	__m128 XMM2, XMM5, XMM6, XMM7;											\
+	XMM2 = XMM0;															\
+	XMM5 = XMM4;															\
+	XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(1,0,1,0));			\
+	XMM2	 = _mm_shuffle_ps(XMM2, XMM1, _MM_SHUFFLE(3,2,3,2));			\
+	XMM4	 = _mm_shuffle_ps(XMM4, XMM3, _MM_SHUFFLE(1,0,1,0));			\
+	XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(3,2,3,2));			\
+	XMM1 = XMM0;															\
+	XMM3 = XMM2;															\
+	XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));			\
+	XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(3,1,3,1));			\
+	XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(2,0,2,0));			\
+	XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(3,1,3,1));			\
+	XMM4 = XMM2;															\
+	XMM5 = XMM0;															\
+	XMM6 = XMM3;															\
+	XMM7 = XMM0;															\
+	XMM4 = _mm_mul_ps(XMM4, XMM1);											\
+	XMM5 = _mm_mul_ps(XMM5, XMM3);											\
+	XMM3 = _mm_load_ps(findex+i);											\
+	XMM6 = _mm_mul_ps(XMM6, TN.ps);											\
+	XMM1 = _mm_mul_ps(XMM1, TN.ps);											\
+	XMM7 = _mm_mul_ps(XMM7, XMM2);											\
+	XMM0 = _mm_mul_ps(XMM0, XMM0);											\
+	XMM4 = _mm_sub_ps(XMM4, XMM5);											\
+	XMM6 = _mm_sub_ps(XMM6, XMM7);											\
+	XMM1 = _mm_sub_ps(XMM1, XMM0);											\
+	PA	 = XMM4;															\
+	PB	 = XMM6;															\
+	XMM6 = _mm_mul_ps(XMM6, XMM3);											\
+	XMM3 = _mm_rcp_ps(XMM1);												\
+	XMM4 = _mm_add_ps(XMM4, XMM6);											\
+	XMM1 = _mm_mul_ps(XMM1, XMM3);											\
+	XMM1 = _mm_mul_ps(XMM1, XMM3);											\
+	XMM3 = _mm_add_ps(XMM3, XMM3);											\
+	XMM3 = _mm_sub_ps(XMM3, XMM1);											\
+	PD	 = XMM3;															\
+	XMM4 = _mm_mul_ps(XMM4, XMM3);											\
+}
+#endif														/* SSE Optimize */
+
+#ifdef __SSE__												/* SSE Optimize */
+static void bark_noise_hybridmp(const vorbis_look_psy *p,
+								const float *f,
+								float *noise,
+								const float offset,
+								const int fixed,
+								float *work,
+								float *tf){
+	int		n = p->n;
+	float	*N		 = work;
+	__m128	*XXYY	 = (__m128*)(N+n);
+	float	*xxyy	 = N+n;
+	short	*sb	 = (short*)p->bark;
+	
+	int		i, j;
+	int		lo, hi;
+	int		midpoint1, midpoint2;
+	float	tN, tX, tXX, tY, tXY;
+	float R=0.f;
+	float A=0.f;
+	float B=0.f;
+	float D=1.f;
+	float	x;
+	float	*TN = N;
+	__m128	*TXXYY = XXYY;
+	
+	__m128	OFFSET;
+	__m128	PXXYY	 = _mm_setzero_ps();
+	__m128	PA, PB, PD;
+	_MM_ALIGN16 __m128	TEMP[16];
+	int	p0, p1;
+	
+	// Phase 1
+	_mm_prefetch((const char*)(f     ), _MM_HINT_NTA);
+	_mm_prefetch((const char*)(findex2     ), _MM_HINT_NTA);
+	_mm_prefetch((const char*)(f  +16), _MM_HINT_NTA);
+	_mm_prefetch((const char*)(findex2  +16), _MM_HINT_NTA);
+	OFFSET	 = _mm_set_ps1(offset);
+	{
+		__m128	XMM0	 = _mm_load_ps(f   );
+		__m128	XMM1	 = _mm_load_ps(f+ 4);
+		__m128	XMM2	 = _mm_load_ps(f+ 8);
+		__m128	XMM3	 = _mm_load_ps(f+12);
+		__m128	XMM4, XMM5, XMM6, XMM7;
+		XMM4	 = OFFSET;
+		XMM5	 = _mm_load_ps(PFV_1);
+		XMM0	 = _mm_add_ps(XMM0, XMM4);
+		XMM1	 = _mm_add_ps(XMM1, XMM4);
+		XMM2	 = _mm_add_ps(XMM2, XMM4);
+		XMM3	 = _mm_add_ps(XMM3, XMM4);
+		XMM0	 = _mm_max_ps(XMM0, XMM5);
+		XMM1	 = _mm_max_ps(XMM1, XMM5);
+		XMM2	 = _mm_max_ps(XMM2, XMM5);
+		XMM3	 = _mm_max_ps(XMM3, XMM5);
+		XMM4	 = XMM0;
+		XMM5	 = XMM1;
+		XMM6	 = XMM2;
+		XMM7	 = XMM3;
+		XMM0	 = _mm_mul_ps(XMM0, XMM0);
+		XMM1	 = _mm_mul_ps(XMM1, XMM1);
+		XMM2	 = _mm_mul_ps(XMM2, XMM2);
+		XMM3	 = _mm_mul_ps(XMM3, XMM3);
+		_mm_store_ps(TN   , XMM0);	/* N */
+		_mm_store_ps(TN+ 4, XMM1);
+		_mm_store_ps(TN+ 8, XMM2);
+		_mm_store_ps(TN+12, XMM3);
+		XMM0	 = _mm_mul_ps(XMM0, XMM4);
+		XMM1	 = _mm_mul_ps(XMM1, XMM5);
+		XMM2	 = _mm_mul_ps(XMM2, XMM6);
+		XMM3	 = _mm_mul_ps(XMM3, XMM7);
+		TEMP[ 1]	 = XMM0;	/* Y */
+		PXXYY	 = _mm_move_ss(PXXYY, TEMP[1]);
+		XMM4	 = _mm_load_ps(findex   );
+		TEMP[ 5]	 = XMM1;
+		XMM5	 = _mm_load_ps(findex+ 4);
+		TEMP[ 9]	 = XMM2;
+		XMM6	 = _mm_load_ps(findex+ 8);
+		TEMP[13]	 = XMM3;
+		XMM7	 = _mm_load_ps(findex+12);
+		XMM0	 = _mm_mul_ps(XMM0, XMM4);
+		XMM1	 = _mm_mul_ps(XMM1, XMM5);
+		XMM2	 = _mm_mul_ps(XMM2, XMM6);
+		XMM3	 = _mm_mul_ps(XMM3, XMM7);
+		TEMP[ 3]	 = XMM0;	/* XY */
+		TEMP[ 7]	 = XMM1;
+		TEMP[11]	 = XMM2;
+		TEMP[15]	 = XMM3;
+		XMM0	 = _mm_load_ps(TN   );	/* N */
+		XMM1	 = _mm_load_ps(TN+ 4);
+		XMM2	 = _mm_load_ps(TN+ 8);
+		XMM3	 = _mm_load_ps(TN+12);
+		XMM4	 = _mm_mul_ps(XMM4, XMM0);
+		XMM5	 = _mm_mul_ps(XMM5, XMM1);
+		XMM6	 = _mm_mul_ps(XMM6, XMM2);
+		XMM7	 = _mm_mul_ps(XMM7, XMM3);
+		TEMP[ 0]	 = XMM4;	/* X */
+		TEMP[ 4]	 = XMM5;
+		TEMP[ 8]	 = XMM6;
+		TEMP[12]	 = XMM7;
+		XMM4	 = _mm_load_ps(findex2   );
+		XMM5	 = _mm_load_ps(findex2+ 4);
+		XMM6	 = _mm_load_ps(findex2+ 8);
+		XMM7	 = _mm_load_ps(findex2+12);
+		XMM0	 = _mm_mul_ps(XMM0, XMM4);
+		XMM4	 = TEMP[0];	// X
+		XMM1	 = _mm_mul_ps(XMM1, XMM5);
+		XMM5	 = TEMP[1];	// Y
+		XMM2	 = _mm_mul_ps(XMM2, XMM6);
+		XMM6	 = XMM0;	// XX
+		XMM3	 = _mm_mul_ps(XMM3, XMM7);
+		XMM7	 = TEMP[3];	// XY
+		XMM0	 = XMM4;
+		TEMP[ 6]	 = XMM1;
+		XMM1	 = XMM5;
+		// i=0-3
+		// PXXYY	 = (0, 0, 0, Y^2)
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM6, _MM_SHUFFLE(1,0,1,0));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM6, _MM_SHUFFLE(3,2,3,2));
+		TEMP[10]	 = XMM2;
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(1,0,1,0));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM7, _MM_SHUFFLE(3,2,3,2));
+		TEMP[14]	 = XMM3;
+		XMM6	 = XMM4;
+		XMM7	 = XMM0;
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM5, _MM_SHUFFLE(2,0,2,0));
+		XMM6	 = _mm_shuffle_ps(XMM6, XMM5, _MM_SHUFFLE(3,1,3,1));
+		XMM5	 = TEMP[ 4];	// X
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(2,0,2,0));
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM1, _MM_SHUFFLE(3,1,3,1));
+		XMM1	 = TEMP[ 5];	// Y
+		// XXYY[i+0]	 = (XY,  Y, XX,  X)	 = (0, Y^3, 0, 0)
+		// To Fix (0, Y^3*.5f, 0, Y^2*.5f)
+		XMM4	 = _mm_add_ps(XMM4, PXXYY);
+		TN[ 0]	*= 0.5;
+		XMM4	 = _mm_mul_ps(XMM4, PM128(PFV_0P5));
+		TN[ 1]	+= TN[ 0];
+		XMM6	 = _mm_add_ps(XMM6, XMM4);
+		TN[ 2]	+= TN[ 1];
+		XMM0	 = _mm_add_ps(XMM0, XMM6);
+		TN[ 3]	+= TN[ 2];
+		XMM7	 = _mm_add_ps(XMM7, XMM0);
+		TXXYY[ 0]	 = XMM4;
+		XMM4	 = TEMP[ 6];	// XX
+		TXXYY[ 1]	 = XMM6;
+		XMM6	 = TEMP[ 7];	// XY
+		TXXYY[ 2]	 = XMM0;
+		XMM0	 = XMM5;
+		TXXYY[ 3]	 = XMM7;
+		XMM7	 = XMM1;
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM4, _MM_SHUFFLE(1,0,1,0));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(3,2,3,2));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM6, _MM_SHUFFLE(1,0,1,0));
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM6, _MM_SHUFFLE(3,2,3,2));
+		XMM4	 = XMM5;
+		XMM6	 = XMM0;
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM1, _MM_SHUFFLE(2,0,2,0));
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM1, _MM_SHUFFLE(3,1,3,1));
+		XMM1	 = TEMP[ 8];	// X
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM7, _MM_SHUFFLE(2,0,2,0));
+		XMM6	 = _mm_shuffle_ps(XMM6, XMM7, _MM_SHUFFLE(3,1,3,1));
+		XMM7	 = TEMP[ 9];	// Y
+		XMM5	 = _mm_add_ps(XMM5, TXXYY[ 3]);
+		TN[ 4]	+= TN[ 3];
+		XMM4	 = _mm_add_ps(XMM4, XMM5);
+		TN[ 5]	+= TN[ 4];
+		XMM0	 = _mm_add_ps(XMM0, XMM4);
+		TN[ 6]	+= TN[ 5];
+		XMM6	 = _mm_add_ps(XMM6, XMM0);
+		TN[ 7]	+= TN[ 6];
+		TXXYY[ 4]	 = XMM5;
+		XMM5	 = TEMP[10];	// XX
+		TXXYY[ 5]	 = XMM4;
+		XMM4	 = TEMP[11];	// XY
+		TXXYY[ 6]	 = XMM0;
+		XMM0	 = XMM1;
+		TXXYY[ 7]	 = XMM6;
+		XMM6	 = XMM7;
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM5, _MM_SHUFFLE(1,0,1,0));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM5, _MM_SHUFFLE(3,2,3,2));
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM4, _MM_SHUFFLE(1,0,1,0));
+		XMM6	 = _mm_shuffle_ps(XMM6, XMM4, _MM_SHUFFLE(3,2,3,2));
+		XMM5	 = XMM1;
+		XMM4	 = XMM0;
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM7, _MM_SHUFFLE(2,0,2,0));
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(3,1,3,1));
+		XMM7	 = TEMP[12];	// X
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM6, _MM_SHUFFLE(2,0,2,0));
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM6, _MM_SHUFFLE(3,1,3,1));
+		XMM6	 = TEMP[13];	// Y
+		XMM1	 = _mm_add_ps(XMM1, TXXYY[ 7]);
+		TN[ 8]	+= TN[ 7];
+		XMM5	 = _mm_add_ps(XMM5, XMM1);
+		TN[ 9]	+= TN[ 8];
+		XMM0	 = _mm_add_ps(XMM0, XMM5);
+		TN[10]	+= TN[ 9];
+		XMM4	 = _mm_add_ps(XMM4, XMM0);
+		TN[11]	+= TN[10];
+		TXXYY[ 8]	 = XMM1;
+		XMM1	 = TEMP[14];	// XX
+		TXXYY[ 9]	 = XMM5;
+		XMM5	 = TEMP[15];	// XY
+		TXXYY[10]	 = XMM0;
+		XMM0	 = XMM7;
+		TXXYY[11]	 = XMM4;
+		XMM4	 = XMM6;
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM1, _MM_SHUFFLE(1,0,1,0));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(3,2,3,2));
+		XMM6	 = _mm_shuffle_ps(XMM6, XMM5, _MM_SHUFFLE(1,0,1,0));
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM5, _MM_SHUFFLE(3,2,3,2));
+		XMM1	 = XMM7;
+		XMM5	 = XMM0;
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM6, _MM_SHUFFLE(2,0,2,0));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM6, _MM_SHUFFLE(3,1,3,1));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM4, _MM_SHUFFLE(3,1,3,1));
+		XMM7	 = _mm_add_ps(XMM7, TXXYY[11]);
+		TN[12]	+= TN[11];
+		XMM1	 = _mm_add_ps(XMM1, XMM7);
+		TN[13]	+= TN[12];
+		XMM0	 = _mm_add_ps(XMM0, XMM1);
+		TN[14]	+= TN[13];
+		XMM5	 = _mm_add_ps(XMM5, XMM0);
+		TN[15]	+= TN[14];
+		TXXYY[12]	 = XMM7;
+		TXXYY[13]	 = XMM1;
+		TXXYY[14]	 = XMM0;
+		TXXYY[15]	 = XMM5;
+		TN		+= 16;
+		TXXYY	+= 16;
+	}
+	for(i=16;i<n;i+=16)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3;
+		__m128	XMM4, XMM5, XMM6, XMM7;
+		_mm_prefetch((const char*)(f+i+16), _MM_HINT_NTA);
+		_mm_prefetch((const char*)(findex2+i+16), _MM_HINT_NTA);
+		XMM0	 = _mm_load_ps(f+i   );
+		XMM1	 = _mm_load_ps(f+i+ 4);
+		XMM2	 = _mm_load_ps(f+i+ 8);
+		XMM3	 = _mm_load_ps(f+i+12);
+		XMM4	 = OFFSET;
+		XMM5	 = _mm_load_ps(PFV_1);
+		XMM0	 = _mm_add_ps(XMM0, XMM4);
+		XMM1	 = _mm_add_ps(XMM1, XMM4);
+		XMM2	 = _mm_add_ps(XMM2, XMM4);
+		XMM3	 = _mm_add_ps(XMM3, XMM4);
+		XMM0	 = _mm_max_ps(XMM0, XMM5);
+		XMM1	 = _mm_max_ps(XMM1, XMM5);
+		XMM2	 = _mm_max_ps(XMM2, XMM5);
+		XMM3	 = _mm_max_ps(XMM3, XMM5);
+		XMM4	 = XMM0;
+		XMM5	 = XMM1;
+		XMM6	 = XMM2;
+		XMM7	 = XMM3;
+		XMM0	 = _mm_mul_ps(XMM0, XMM0);
+		XMM1	 = _mm_mul_ps(XMM1, XMM1);
+		XMM2	 = _mm_mul_ps(XMM2, XMM2);
+		XMM3	 = _mm_mul_ps(XMM3, XMM3);
+		_mm_store_ps(TN   , XMM0);
+		_mm_store_ps(TN+ 4, XMM1);
+		_mm_store_ps(TN+ 8, XMM2);
+		_mm_store_ps(TN+12, XMM3);
+		XMM0	 = _mm_mul_ps(XMM0, XMM4);
+		XMM1	 = _mm_mul_ps(XMM1, XMM5);
+		XMM2	 = _mm_mul_ps(XMM2, XMM6);
+		XMM3	 = _mm_mul_ps(XMM3, XMM7);
+		TEMP[ 1]	 = XMM0;	/* Y */
+		XMM4	 = _mm_load_ps(findex+i   );
+		TEMP[ 5]	 = XMM1;
+		XMM5	 = _mm_load_ps(findex+i+ 4);
+		TEMP[ 9]	 = XMM2;
+		XMM6	 = _mm_load_ps(findex+i+ 8);
+		TEMP[13]	 = XMM3;
+		XMM7	 = _mm_load_ps(findex+i+12);
+		XMM0	 = _mm_mul_ps(XMM0, XMM4);
+		XMM1	 = _mm_mul_ps(XMM1, XMM5);
+		XMM2	 = _mm_mul_ps(XMM2, XMM6);
+		XMM3	 = _mm_mul_ps(XMM3, XMM7);
+		TEMP[ 3]	 = XMM0;	/* XY */
+		TEMP[ 7]	 = XMM1;
+		TEMP[11]	 = XMM2;
+		TEMP[15]	 = XMM3;
+		XMM0	 = _mm_load_ps(TN   );	/* N */
+		XMM1	 = _mm_load_ps(TN+ 4);
+		XMM2	 = _mm_load_ps(TN+ 8);
+		XMM3	 = _mm_load_ps(TN+12);
+		XMM4	 = _mm_mul_ps(XMM4, XMM0);
+		XMM5	 = _mm_mul_ps(XMM5, XMM1);
+		XMM6	 = _mm_mul_ps(XMM6, XMM2);
+		XMM7	 = _mm_mul_ps(XMM7, XMM3);
+		TEMP[ 0]	 = XMM4;	/* X */
+		TEMP[ 4]	 = XMM5;
+		TEMP[ 8]	 = XMM6;
+		TEMP[12]	 = XMM7;
+		XMM4	 = _mm_load_ps(findex2+i   );
+		XMM5	 = _mm_load_ps(findex2+i+ 4);
+		XMM6	 = _mm_load_ps(findex2+i+ 8);
+		XMM7	 = _mm_load_ps(findex2+i+12);
+		XMM0	 = _mm_mul_ps(XMM0, XMM4);
+		XMM4	 = TEMP[ 0];	// X
+		XMM1	 = _mm_mul_ps(XMM1, XMM5);
+		XMM5	 = TEMP[ 1];	// Y
+		XMM2	 = _mm_mul_ps(XMM2, XMM6);
+		XMM6	 = XMM0;	/* XX */
+		XMM0	 = XMM4;
+		XMM3	 = _mm_mul_ps(XMM3, XMM7);
+		XMM7	 = TEMP[ 3];	// XY
+		TEMP[ 6]	 = XMM1;
+		XMM1	 = XMM5;
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM6, _MM_SHUFFLE(1,0,1,0));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM6, _MM_SHUFFLE(3,2,3,2));
+		TEMP[10]	 = XMM2;
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(1,0,1,0));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM7, _MM_SHUFFLE(3,2,3,2));
+		TEMP[14]	 = XMM3;
+		XMM6	 = XMM4;
+		XMM7	 = XMM0;
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM5, _MM_SHUFFLE(2,0,2,0));
+		XMM6	 = _mm_shuffle_ps(XMM6, XMM5, _MM_SHUFFLE(3,1,3,1));
+		XMM5	 = TEMP[ 4];	// X
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(2,0,2,0));
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM1, _MM_SHUFFLE(3,1,3,1));
+		XMM1	 = TEMP[ 5];	// Y
+		XMM4	 = _mm_add_ps(XMM4, TXXYY[-1]);
+		TN[ 0]	+= TN[-1];
+		XMM6	 = _mm_add_ps(XMM6, XMM4);
+		TN[ 1]	+= TN[ 0];
+		XMM0	 = _mm_add_ps(XMM0, XMM6);
+		TN[ 2]	+= TN[ 1];
+		XMM7	 = _mm_add_ps(XMM7, XMM0);
+		TN[ 3]	+= TN[ 2];
+		TXXYY[ 0]	 = XMM4;
+		XMM4	 = TEMP[ 6];	// XX
+		TXXYY[ 1]	 = XMM6;
+		XMM6	 = TEMP[ 7];	// XY
+		TXXYY[ 2]	 = XMM0;
+		XMM0	 = XMM5;
+		TXXYY[ 3]	 = XMM7;
+		XMM7	 = XMM1;
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM4, _MM_SHUFFLE(1,0,1,0));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(3,2,3,2));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM6, _MM_SHUFFLE(1,0,1,0));
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM6, _MM_SHUFFLE(3,2,3,2));
+		XMM4	 = XMM5;
+		XMM6	 = XMM0;
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM1, _MM_SHUFFLE(2,0,2,0));
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM1, _MM_SHUFFLE(3,1,3,1));
+		XMM1	 = TEMP[ 8];	// X
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM7, _MM_SHUFFLE(2,0,2,0));
+		XMM6	 = _mm_shuffle_ps(XMM6, XMM7, _MM_SHUFFLE(3,1,3,1));
+		XMM7	 = TEMP[ 9];	// Y
+		XMM5	 = _mm_add_ps(XMM5, TXXYY[ 3]);
+		TN[ 4]	+= TN[ 3];
+		XMM4	 = _mm_add_ps(XMM4, XMM5);
+		TN[ 5]	+= TN[ 4];
+		XMM0	 = _mm_add_ps(XMM0, XMM4);
+		TN[ 6]	+= TN[ 5];
+		XMM6	 = _mm_add_ps(XMM6, XMM0);
+		TN[ 7]	+= TN[ 6];
+		TXXYY[ 4]	 = XMM5;
+		XMM5	 = TEMP[10];	// XX
+		TXXYY[ 5]	 = XMM4;
+		XMM4	 = TEMP[11];	// XY
+		TXXYY[ 6]	 = XMM0;
+		XMM0	 = XMM1;
+		TXXYY[ 7]	 = XMM6;
+		XMM6	 = XMM7;
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM5, _MM_SHUFFLE(1,0,1,0));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM5, _MM_SHUFFLE(3,2,3,2));
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM4, _MM_SHUFFLE(1,0,1,0));
+		XMM6	 = _mm_shuffle_ps(XMM6, XMM4, _MM_SHUFFLE(3,2,3,2));
+		XMM5	 = XMM1;
+		XMM4	 = XMM0;
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM7, _MM_SHUFFLE(2,0,2,0));
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(3,1,3,1));
+		XMM7	 = TEMP[12];	// X
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM6, _MM_SHUFFLE(2,0,2,0));
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM6, _MM_SHUFFLE(3,1,3,1));
+		XMM6	 = TEMP[13];	// Y
+		XMM1	 = _mm_add_ps(XMM1, TXXYY[ 7]);
+		TN[ 8]	+= TN[ 7];
+		XMM5	 = _mm_add_ps(XMM5, XMM1);
+		TN[ 9]	+= TN[ 8];
+		XMM0	 = _mm_add_ps(XMM0, XMM5);
+		TN[10]	+= TN[ 9];
+		XMM4	 = _mm_add_ps(XMM4, XMM0);
+		TN[11]	+= TN[10];
+		TXXYY[ 8]	 = XMM1;
+		XMM1	 = TEMP[14];	// XX
+		TXXYY[ 9]	 = XMM5;
+		XMM5	 = TEMP[15];	// XY
+		TXXYY[10]	 = XMM0;
+		XMM0	 = XMM7;
+		TXXYY[11]	 = XMM4;
+		XMM4	 = XMM6;
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM1, _MM_SHUFFLE(1,0,1,0));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(3,2,3,2));
+		XMM6	 = _mm_shuffle_ps(XMM6, XMM5, _MM_SHUFFLE(1,0,1,0));
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM5, _MM_SHUFFLE(3,2,3,2));
+		XMM1	 = XMM7;
+		XMM5	 = XMM0;
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM6, _MM_SHUFFLE(2,0,2,0));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM6, _MM_SHUFFLE(3,1,3,1));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM4, _MM_SHUFFLE(3,1,3,1));
+		XMM7	 = _mm_add_ps(XMM7, TXXYY[11]);
+		TN[12]	+= TN[11];
+		XMM1	 = _mm_add_ps(XMM1, XMM7);
+		TN[13]	+= TN[12];
+		XMM0	 = _mm_add_ps(XMM0, XMM1);
+		TN[14]	+= TN[13];
+		XMM5	 = _mm_add_ps(XMM5, XMM0);
+		TN[15]	+= TN[14];
+		TXXYY[12]	 = XMM7;
+		TXXYY[13]	 = XMM1;
+		TXXYY[14]	 = XMM0;
+		TXXYY[15]	 = XMM5;
+		TN		+= 16;
+		TXXYY	+= 16;
+	}
+	for(i=0;i<p->midpoint1_4;i+=4)
+	{
+		__m128	XMM0, XMM1, XMM4, XMM3;
+		__m128x	TN, TN1;
+		int	p0, p1, p2, p3;
+		p0	 =-sb[i*2+1];
+		p1	 =-sb[i*2+3];
+		p2	 =-sb[i*2+5];
+		p3	 =-sb[i*2+7];
+		
+		XMM0	 = XXYY[p0];
+		XMM1	 = XXYY[p1];
+		XMM4	 = XXYY[p2];
+		XMM3	 = XXYY[p3];
+		
+		TN.sf[0]	 = N[p0];
+		TN.sf[1]	 = N[p1];
+		TN.sf[2]	 = N[p2];
+		TN.sf[3]	 = N[p3];
+		
+		XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+		XMM1	 = _mm_xor_ps(XMM1, PM128(PCS_RNNR));
+		XMM4	 = _mm_xor_ps(XMM4, PM128(PCS_RNNR));
+		XMM3	 = _mm_xor_ps(XMM3, PM128(PCS_RNNR));
+		
+		p0	 = sb[i*2  ];
+		p1	 = sb[i*2+2];
+		p2	 = sb[i*2+4];
+		p3	 = sb[i*2+6];
+		
+		XMM0	 = _mm_add_ps(XMM0, XXYY[p0]);
+		XMM1	 = _mm_add_ps(XMM1, XXYY[p1]);
+		XMM4	 = _mm_add_ps(XMM4, XXYY[p2]);
+		XMM3	 = _mm_add_ps(XMM3, XXYY[p3]);
+		
+		TN1.sf[0]	 = N[p0];
+		TN1.sf[1]	 = N[p1];
+		TN1.sf[2]	 = N[p2];
+		TN1.sf[3]	 = N[p3];
+		
+		TN.ps	 = _mm_add_ps(TN.ps, TN1.ps);
+		
+		bark_noise_hybridmp_SSE_SUBC();
+		XMM4	 = _mm_max_ps(XMM4, PM128(PFV_0));
+		XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+		_mm_store_ps(noise+i  , XMM4);
+	}
+	if(p->midpoint2-i<4)
+	{
+		x	 = (float)i;
+		for (;i<p->midpoint1;i++,x+=1.f)
+		{
+			lo	 = sb[i*2+1];
+			hi	 = sb[i*2];
+			
+			tN	 = N[hi] + N[-lo];
+			tX	 = xxyy[hi*4  ] - xxyy[-lo*4  ];
+			tXX	 = xxyy[hi*4+1] + xxyy[-lo*4+1];
+			tY	 = xxyy[hi*4+2] + xxyy[-lo*4+2];
+			tXY	 = xxyy[hi*4+3] - xxyy[-lo*4+3];
+			
+			A	 = tY * tXX - tX * tXY;
+			B	 = tN * tXY - tX * tY;
+			D	 = tN * tXX - tX * tX;
+			R	 = (A + x * B) / D;
+			if(R<0.f)
+				R	 = 0.f;
+			
+			noise[i]	 = R - offset;
+		}
+		for (;i<p->midpoint2;i++,x+=1.f)
+		{
+			lo	 = sb[i*2+1];
+			hi	 = sb[i*2];
+			
+			tN	 = N[hi] - N[lo];
+			tX	 = xxyy[hi*4  ] - xxyy[lo*4  ];
+			tXX	 = xxyy[hi*4+1] - xxyy[lo*4+1];
+			tY	 = xxyy[hi*4+2] - xxyy[lo*4+2];
+			tXY	 = xxyy[hi*4+3] - xxyy[lo*4+3];
+			
+			A	 = tY * tXX - tX * tXY;
+			B	 = tN * tXY - tX * tY;
+			D	 = tN * tXX - tX * tX;
+			R	 = (A + x * B) / D;
+			if(R<0.f)
+				R	 = 0.f;
+			noise[i]	 = R - offset;
+		}
+		j	 = (i+3)&(~3);
+		j	 = (j>=n)?n:j;
+		for (;i<j;i++,x+=1.f)
+		{
+			R	 = (A + x * B) / D;
+			if(R<0.f)
+				R	 = 0.f;
+			
+			noise[i]	 = R - offset;
+		}
+		PA	 = _mm_set_ps1(A);
+		PB	 = _mm_set_ps1(B);
+		PD	 = _mm_set_ps1(1.f/D);
+	}
+	else
+	{
+		switch(p->midpoint1%4)
+		{
+			case 0:
+				break;
+			case 1:
+				{
+					__m128	XMM0, XMM1, XMM4, XMM3;
+					__m128x	TN, TN1;
+					int	p0, p1, p2, p3;
+					p0	 =-sb[i*2+1];
+					p1	 = sb[i*2+2];
+					p2	 = sb[i*2+4];
+					p3	 = sb[i*2+6];
+					
+					XMM0	 = XXYY[p0];
+					XMM1	 = XXYY[p1];
+					XMM4	 = XXYY[p2];
+					XMM3	 = XXYY[p3];
+					
+					TN.sf[0]	 = N[p0];
+					TN.sf[1]	 = N[p1];
+					TN.sf[2]	 = N[p2];
+					TN.sf[3]	 = N[p3];
+					
+					XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+					
+					p0	 = sb[i*2  ];
+					p1	 = sb[i*2+3];
+					p2	 = sb[i*2+5];
+					p3	 = sb[i*2+7];
+					
+					XMM0	 = _mm_add_ps(XMM0, XXYY[p0]);
+					XMM1	 = _mm_sub_ps(XMM1, XXYY[p1]);
+					XMM4	 = _mm_sub_ps(XMM4, XXYY[p2]);
+					XMM3	 = _mm_sub_ps(XMM3, XXYY[p3]);
+					
+					TN1.sf[0]	 = N[p0];
+					TN1.sf[1]	 = N[p1];
+					TN1.sf[2]	 = N[p2];
+					TN1.sf[3]	 = N[p3];
+					
+					TN.ps	 = _mm_sub_ps(TN.ps, _mm_xor_ps(TN1.ps, PM128(PCS_NNNR)));
+					
+					bark_noise_hybridmp_SSE_SUBC();
+					XMM4	 = _mm_max_ps(XMM4, PM128(PFV_0));
+					XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+					_mm_store_ps(noise+i  , XMM4);
+					i	+= 4;
+				}
+				break;
+			case 2:
+				{
+					__m128	XMM0, XMM1, XMM4, XMM3;
+					__m128x	TN, TN1;
+					int	p0, p1, p2, p3;
+					p0	 =-sb[i*2+1];
+					p1	 =-sb[i*2+3];
+					p2	 = sb[i*2+4];
+					p3	 = sb[i*2+6];
+					
+					XMM0	 = XXYY[p0];
+					XMM1	 = XXYY[p1];
+					XMM4	 = XXYY[p2];
+					XMM3	 = XXYY[p3];
+					
+					TN.sf[0]	 = N[p0];
+					TN.sf[1]	 = N[p1];
+					TN.sf[2]	 = N[p2];
+					TN.sf[3]	 = N[p3];
+					
+					XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+					XMM1	 = _mm_xor_ps(XMM1, PM128(PCS_RNNR));
+					
+					p0	 = sb[i*2  ];
+					p1	 = sb[i*2+2];
+					p2	 = sb[i*2+5];
+					p3	 = sb[i*2+7];
+					
+					XMM0	 = _mm_add_ps(XMM0, XXYY[p0]);
+					XMM1	 = _mm_add_ps(XMM1, XXYY[p1]);
+					XMM4	 = _mm_sub_ps(XMM4, XXYY[p2]);
+					XMM3	 = _mm_sub_ps(XMM3, XXYY[p3]);
+					
+					TN1.sf[0]	 = N[p0];
+					TN1.sf[1]	 = N[p1];
+					TN1.sf[2]	 = N[p2];
+					TN1.sf[3]	 = N[p3];
+					
+					TN.ps	 = _mm_sub_ps(TN.ps, _mm_xor_ps(TN1.ps, PM128(PCS_NNRR)));
+					
+					bark_noise_hybridmp_SSE_SUBC();
+					XMM4	 = _mm_max_ps(XMM4, PM128(PFV_0));
+					XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+					_mm_store_ps(noise+i  , XMM4);
+					i	+= 4;
+				}
+				break;
+			case 3:
+				{
+					__m128	XMM0, XMM1, XMM4, XMM3;
+					__m128x	TN, TN1;
+					int	p0, p1, p2, p3;
+					p0	 =-sb[i*2+1];
+					p1	 =-sb[i*2+3];
+					p2	 =-sb[i*2+5];
+					p3	 = sb[i*2+6];
+					
+					XMM0	 = XXYY[p0];
+					XMM1	 = XXYY[p1];
+					XMM4	 = XXYY[p2];
+					XMM3	 = XXYY[p3];
+					
+					TN.sf[0]	 = N[p0];
+					TN.sf[1]	 = N[p1];
+					TN.sf[2]	 = N[p2];
+					TN.sf[3]	 = N[p3];
+					
+					XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+					XMM1	 = _mm_xor_ps(XMM1, PM128(PCS_RNNR));
+					XMM4	 = _mm_xor_ps(XMM4, PM128(PCS_RNNR));
+					
+					p0	 = sb[i*2  ];
+					p1	 = sb[i*2+2];
+					p2	 = sb[i*2+4];
+					p3	 = sb[i*2+7];
+					
+					XMM0	 = _mm_add_ps(XMM0, XXYY[p0]);
+					XMM1	 = _mm_add_ps(XMM1, XXYY[p1]);
+					XMM4	 = _mm_add_ps(XMM4, XXYY[p2]);
+					XMM3	 = _mm_sub_ps(XMM3, XXYY[p3]);
+					
+					TN1.sf[0]	 = N[p0];
+					TN1.sf[1]	 = N[p1];
+					TN1.sf[2]	 = N[p2];
+					TN1.sf[3]	 = N[p3];
+					
+					TN.ps	 = _mm_sub_ps(TN.ps, _mm_xor_ps(TN1.ps, PM128(PCS_NRRR)));
+					
+					bark_noise_hybridmp_SSE_SUBC();
+					XMM4	 = _mm_max_ps(XMM4, PM128(PFV_0));
+					XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+					_mm_store_ps(noise+i  , XMM4);
+					i	+= 4;
+				}
+				break;
+		}
+		for(;i<p->midpoint2_16;i+=16)
+		{
+			register __m128	XMM0, XMM1, XMM2, XMM3;
+			register __m128	XMM4, XMM5, XMM6, XMM7;
+			__m128x	TN0, TN1, TN2;
+			int	p0, p1, p2, p3;
+			p0	 = sb[i*2   ];
+			p1	 = sb[i*2+ 2];
+			p2	 = sb[i*2+ 4];
+			p3	 = sb[i*2+ 6];
+			XMM0	 = XXYY[p0];
+			XMM1	 = XXYY[p1];
+			XMM4	 = XXYY[p2];
+			XMM3	 = XXYY[p3];
+			TN0.sf[0]	 = N[p0];
+			TN0.sf[1]	 = N[p1];
+			TN0.sf[2]	 = N[p2];
+			TN0.sf[3]	 = N[p3];
+			p0	 = sb[i*2+ 1];
+			p1	 = sb[i*2+ 3];
+			p2	 = sb[i*2+ 5];
+			p3	 = sb[i*2+ 7];
+			XMM2	 = XXYY[p0];
+			XMM5	 = XXYY[p1];
+			XMM6	 = XXYY[p2];
+			XMM7	 = XXYY[p3];
+			XMM0	 = _mm_sub_ps(XMM0, XMM2);
+			XMM1	 = _mm_sub_ps(XMM1, XMM5);
+			XMM4	 = _mm_sub_ps(XMM4, XMM6);
+			XMM3	 = _mm_sub_ps(XMM3, XMM7);
+			TN1.sf[0]	 = N[p0];
+			TN1.sf[1]	 = N[p1];
+			TN1.sf[2]	 = N[p2];
+			TN1.sf[3]	 = N[p3];
+			XMM2	 = XMM0;
+			XMM5	 = XMM4;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(1,0,1,0));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM1, _MM_SHUFFLE(3,2,3,2));
+			XMM7	 = TN0.ps;
+			XMM6	 = TN1.ps;
+			XMM4	 = _mm_shuffle_ps(XMM4, XMM3, _MM_SHUFFLE(1,0,1,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(3,2,3,2));
+			p0	 = sb[i*2+ 8];
+			p1	 = sb[i*2+10];
+			XMM1	 = XMM0;
+			XMM3	 = XMM2;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(3,1,3,1));
+			XMM7	 = _mm_sub_ps(XMM7, XMM6);
+			p2	 = sb[i*2+12];
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(2,0,2,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(3,1,3,1));
+			TN0.ps	 = XMM7;
+			p3	 = sb[i*2+14];
+			XMM4	 = XMM2;
+			XMM5	 = XMM0;
+			XMM6	 = XMM3;
+			XMM7	 = XMM0;
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM5	 = _mm_mul_ps(XMM5, XMM3);
+			XMM3	 = TN0.ps;
+			XMM6	 = _mm_mul_ps(XMM6, XMM3);
+			XMM1	 = _mm_mul_ps(XMM1, XMM3);
+			XMM3	 = _mm_load_ps(findex+i   );
+			XMM7	 = _mm_mul_ps(XMM7, XMM2);
+			XMM2	 = XXYY[p0];
+			XMM0	 = _mm_mul_ps(XMM0, XMM0);
+			XMM4	 = _mm_sub_ps(XMM4, XMM5);
+			XMM5	 = XXYY[p1];
+			XMM6	 = _mm_sub_ps(XMM6, XMM7);
+			XMM7	 = XXYY[p2];
+			XMM1	 = _mm_sub_ps(XMM1, XMM0);
+			XMM0	 = XXYY[p3];
+			XMM6	 = _mm_mul_ps(XMM6, XMM3);
+			XMM3	 = _mm_rcp_ps(XMM1);
+			TN0.sf[0]	 = N[p0];
+			TN0.sf[1]	 = N[p1];
+			XMM4	 = _mm_add_ps(XMM4, XMM6);
+			XMM1	 = _mm_mul_ps(XMM1, XMM3);
+			TN0.sf[2]	 = N[p2];
+			TN0.sf[3]	 = N[p3];
+			XMM1	 = _mm_mul_ps(XMM1, XMM3);
+			p0	 = sb[i*2+ 9];
+			p1	 = sb[i*2+11];
+			XMM3	 = _mm_add_ps(XMM3, XMM3);
+			p2	 = sb[i*2+13];
+			p3	 = sb[i*2+15];
+			XMM3	 = _mm_sub_ps(XMM3, XMM1);
+			XMM1	 = _mm_load_ps(PFV_0);
+			XMM6	 = XXYY[p0];
+			XMM4	 = _mm_mul_ps(XMM4, XMM3);
+			XMM3	 = OFFSET;
+			XMM4	 = _mm_max_ps(XMM4, XMM1);
+			XMM1	 = XXYY[p1];
+			XMM4	 = _mm_sub_ps(XMM4, XMM3);
+			XMM3	 = XXYY[p2];
+			_mm_store_ps(noise+i   , XMM4);
+			XMM4	 = XXYY[p3];
+			XMM2	 = _mm_sub_ps(XMM2, XMM6);
+			XMM5	 = _mm_sub_ps(XMM5, XMM1);
+			XMM7	 = _mm_sub_ps(XMM7, XMM3);
+			XMM0	 = _mm_sub_ps(XMM0, XMM4);
+			TN1.sf[0]	 = N[p0];
+			TN1.sf[1]	 = N[p1];
+			TN1.sf[2]	 = N[p2];
+			TN1.sf[3]	 = N[p3];
+			XMM6	 = XMM2;
+			XMM1	 = XMM7;
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(1,0,1,0));
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM5, _MM_SHUFFLE(3,2,3,2));
+			XMM4	 = TN0.ps;
+			XMM3	 = TN1.ps;
+			XMM7	 = _mm_shuffle_ps(XMM7, XMM0, _MM_SHUFFLE(1,0,1,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM0, _MM_SHUFFLE(3,2,3,2));
+			p0	 = sb[i*2+16];
+			p1	 = sb[i*2+18];
+			XMM4	 = _mm_sub_ps(XMM4, XMM3);
+			XMM5	 = XMM2;
+			XMM0	 = XMM6;
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM7, _MM_SHUFFLE(2,0,2,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(3,1,3,1));
+			p2	 = sb[i*2+20];
+			p3	 = sb[i*2+22];
+			TN0.ps	 = XMM4;
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM1, _MM_SHUFFLE(2,0,2,0));
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(3,1,3,1));
+			TN2.sf[0]	 = N[p0];
+			TN2.sf[1]	 = N[p1];
+			TN2.sf[2]	 = N[p2];
+			TN2.sf[3]	 = N[p3];
+			XMM7	 = XMM6;
+			XMM1	 = XMM2;
+			XMM3	 = XMM0;
+			XMM4	 = XMM2;
+			XMM7	 = _mm_mul_ps(XMM7, XMM5);
+			XMM1	 = _mm_mul_ps(XMM1, XMM0);
+			XMM0	 = TN0.ps;
+			XMM3	 = _mm_mul_ps(XMM3, XMM0);
+			XMM5	 = _mm_mul_ps(XMM5, XMM0);
+			XMM0	 = _mm_load_ps(findex+i+ 4);
+			XMM4	 = _mm_mul_ps(XMM4, XMM6);
+			XMM6	 = XXYY[p0];
+			XMM2	 = _mm_mul_ps(XMM2, XMM2);
+			XMM7	 = _mm_sub_ps(XMM7, XMM1);
+			XMM1	 = XXYY[p1];
+			XMM3	 = _mm_sub_ps(XMM3, XMM4);
+			XMM4	 = XXYY[p2];
+			XMM5	 = _mm_sub_ps(XMM5, XMM2);
+			XMM2	 = XXYY[p3];
+			XMM3	 = _mm_mul_ps(XMM3, XMM0);
+			XMM0	 = _mm_rcp_ps(XMM5);
+			p0	 = sb[i*2+17];
+			p1	 = sb[i*2+19];
+			XMM7	 = _mm_add_ps(XMM7, XMM3);
+			XMM3	 = XXYY[p0];
+			XMM5	 = _mm_mul_ps(XMM5, XMM0);
+			p2	 = sb[i*2+21];
+			p3	 = sb[i*2+23];
+			XMM5	 = _mm_mul_ps(XMM5, XMM0);
+			XMM0	 = _mm_add_ps(XMM0, XMM0);
+			TN1.sf[0]	 = N[p0];
+			XMM0	 = _mm_sub_ps(XMM0, XMM5);
+			XMM5	 = _mm_load_ps(PFV_0);
+			XMM7	 = _mm_mul_ps(XMM7, XMM0);
+			TN1.sf[1]	 = N[p1];
+			XMM0	 = OFFSET;
+			XMM7	 = _mm_max_ps(XMM7, XMM5);
+			TN1.sf[2]	 = N[p2];
+			XMM5	 = XXYY[p1];
+			XMM7	 = _mm_sub_ps(XMM7, XMM0);
+			TN1.sf[3]	 = N[p3];
+			XMM0	 = XXYY[p2];
+			_mm_store_ps(noise+i+ 4, XMM7);
+			XMM7	 = XXYY[p3];
+			XMM6	 = _mm_sub_ps(XMM6, XMM3);
+			XMM1	 = _mm_sub_ps(XMM1, XMM5);
+			XMM4	 = _mm_sub_ps(XMM4, XMM0);
+			XMM2	 = _mm_sub_ps(XMM2, XMM7);
+			XMM3	 = XMM6;
+			XMM5	 = XMM4;
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM1, _MM_SHUFFLE(1,0,1,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM1, _MM_SHUFFLE(3,2,3,2));
+			XMM7	 = TN2.ps;
+			XMM0	 = TN1.ps;
+			XMM4	 = _mm_shuffle_ps(XMM4, XMM2, _MM_SHUFFLE(1,0,1,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM2, _MM_SHUFFLE(3,2,3,2));
+			p0	 = sb[i*2+24];
+			p1	 = sb[i*2+26];
+			XMM1	 = XMM6;
+			XMM2	 = XMM3;
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM4, _MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(3,1,3,1));
+			XMM7	 = _mm_sub_ps(XMM7, XMM0);
+			p2	 = sb[i*2+28];
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(2,0,2,0));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(3,1,3,1));
+			TN0.ps	 = XMM7;
+			p3	 = sb[i*2+30];
+			XMM4	 = XMM3;
+			XMM5	 = XMM6;
+			XMM0	 = XMM2;
+			XMM7	 = XMM6;
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM5	 = _mm_mul_ps(XMM5, XMM2);
+			XMM2	 = TN0.ps;
+			XMM0	 = _mm_mul_ps(XMM0, XMM2);
+			XMM1	 = _mm_mul_ps(XMM1, XMM2);
+			XMM2	 = _mm_load_ps(findex+i+ 8);
+			XMM7	 = _mm_mul_ps(XMM7, XMM3);
+			XMM3	 = XXYY[p0];
+			XMM6	 = _mm_mul_ps(XMM6, XMM6);
+			XMM4	 = _mm_sub_ps(XMM4, XMM5);
+			XMM5	 = XXYY[p1];
+			XMM0	 = _mm_sub_ps(XMM0, XMM7);
+			XMM7	 = XXYY[p2];
+			XMM1	 = _mm_sub_ps(XMM1, XMM6);
+			XMM6	 = XXYY[p3];
+			XMM0	 = _mm_mul_ps(XMM0, XMM2);
+			XMM2	 = _mm_rcp_ps(XMM1);
+			TN0.sf[0]	 = N[p0];
+			TN0.sf[1]	 = N[p1];
+			XMM4	 = _mm_add_ps(XMM4, XMM0);
+			XMM1	 = _mm_mul_ps(XMM1, XMM2);
+			TN0.sf[2]	 = N[p2];
+			TN0.sf[3]	 = N[p3];
+			XMM1	 = _mm_mul_ps(XMM1, XMM2);
+			p0	 = sb[i*2+25];
+			p1	 = sb[i*2+27];
+			XMM2	 = _mm_add_ps(XMM2, XMM2);
+			p2	 = sb[i*2+29];
+			p3	 = sb[i*2+31];
+			XMM2	 = _mm_sub_ps(XMM2, XMM1);
+			XMM1	 = _mm_load_ps(PFV_0);
+			XMM0	 = XXYY[p0];
+			XMM4	 = _mm_mul_ps(XMM4, XMM2);
+			XMM2	 = OFFSET;
+			XMM4	 = _mm_max_ps(XMM4, XMM1);
+			XMM1	 = XXYY[p1];
+			XMM4	 = _mm_sub_ps(XMM4, XMM2);
+			XMM2	 = XXYY[p2];
+			_mm_store_ps(noise+i+ 8, XMM4);
+			XMM4	 = XXYY[p3];
+			XMM3	 = _mm_sub_ps(XMM3, XMM0);
+			XMM5	 = _mm_sub_ps(XMM5, XMM1);
+			XMM7	 = _mm_sub_ps(XMM7, XMM2);
+			XMM6	 = _mm_sub_ps(XMM6, XMM4);
+			TN1.sf[0]	 = N[p0];
+			TN1.sf[1]	 = N[p1];
+			TN1.sf[2]	 = N[p2];
+			TN1.sf[3]	 = N[p3];
+			XMM0	 = XMM3;
+			XMM1	 = XMM7;
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(1,0,1,0));
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM5, _MM_SHUFFLE(3,2,3,2));
+			XMM4	 = TN0.ps;
+			XMM2	 = TN1.ps;
+			XMM7	 = _mm_shuffle_ps(XMM7, XMM6, _MM_SHUFFLE(1,0,1,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM6, _MM_SHUFFLE(3,2,3,2));
+			XMM4	 = _mm_sub_ps(XMM4, XMM2);
+			XMM5	 = XMM3;
+			XMM6	 = XMM0;
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM7, _MM_SHUFFLE(2,0,2,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(3,1,3,1));
+			TN0.ps	 = XMM4;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(2,0,2,0));
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM1, _MM_SHUFFLE(3,1,3,1));
+			XMM7	 = XMM0;
+			XMM1	 = XMM3;
+			XMM2	 = XMM6;
+			XMM4	 = XMM3;
+			XMM7	 = _mm_mul_ps(XMM7, XMM5);
+			XMM1	 = _mm_mul_ps(XMM1, XMM6);
+			XMM6	 = TN0.ps;
+			XMM2	 = _mm_mul_ps(XMM2, XMM6);
+			XMM5	 = _mm_mul_ps(XMM5, XMM6);
+			XMM6	 = _mm_load_ps(findex+i+12);
+			XMM4	 = _mm_mul_ps(XMM4, XMM0);
+			XMM3	 = _mm_mul_ps(XMM3, XMM3);
+			XMM7	 = _mm_sub_ps(XMM7, XMM1);
+			XMM2	 = _mm_sub_ps(XMM2, XMM4);
+			XMM5	 = _mm_sub_ps(XMM5, XMM3);
+			XMM2	 = _mm_mul_ps(XMM2, XMM6);
+			XMM6	 = _mm_rcp_ps(XMM5);
+			XMM7	 = _mm_add_ps(XMM7, XMM2);
+			XMM5	 = _mm_mul_ps(XMM5, XMM6);
+			XMM5	 = _mm_mul_ps(XMM5, XMM6);
+			XMM6	 = _mm_add_ps(XMM6, XMM6);
+			XMM6	 = _mm_sub_ps(XMM6, XMM5);
+			XMM5	 = _mm_load_ps(PFV_0);
+			XMM7	 = _mm_mul_ps(XMM7, XMM6);
+			XMM6	 = OFFSET;
+			XMM7	 = _mm_max_ps(XMM7, XMM5);
+			XMM7	 = _mm_sub_ps(XMM7, XMM6);
+			_mm_store_ps(noise+i+12, XMM7);
+		}
+		for(;i<p->midpoint2_8;i+=8)
+		{
+			register __m128	XMM0, XMM1, XMM2, XMM3;
+			register __m128	XMM4, XMM5, XMM6, XMM7;
+			__m128x	TN0, TN1;
+			int	p0, p1, p2, p3;
+			p0	 = sb[i*2   ];
+			p1	 = sb[i*2+ 2];
+			p2	 = sb[i*2+ 4];
+			p3	 = sb[i*2+ 6];
+			XMM0	 = XXYY[p0];
+			XMM1	 = XXYY[p1];
+			XMM4	 = XXYY[p2];
+			XMM3	 = XXYY[p3];
+			TN0.sf[0]	 = N[p0];
+			TN0.sf[1]	 = N[p1];
+			TN0.sf[2]	 = N[p2];
+			TN0.sf[3]	 = N[p3];
+			p0	 = sb[i*2+ 1];
+			p1	 = sb[i*2+ 3];
+			p2	 = sb[i*2+ 5];
+			p3	 = sb[i*2+ 7];
+			XMM2	 = XXYY[p0];
+			XMM5	 = XXYY[p1];
+			XMM6	 = XXYY[p2];
+			XMM7	 = XXYY[p3];
+			XMM0	 = _mm_sub_ps(XMM0, XMM2);
+			XMM1	 = _mm_sub_ps(XMM1, XMM5);
+			XMM4	 = _mm_sub_ps(XMM4, XMM6);
+			XMM3	 = _mm_sub_ps(XMM3, XMM7);
+			TN1.sf[0]	 = N[p0];
+			TN1.sf[1]	 = N[p1];
+			TN1.sf[2]	 = N[p2];
+			TN1.sf[3]	 = N[p3];
+			XMM2	 = XMM0;
+			XMM5	 = XMM4;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(1,0,1,0));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM1, _MM_SHUFFLE(3,2,3,2));
+			XMM7	 = TN0.ps;
+			XMM6	 = TN1.ps;
+			XMM4	 = _mm_shuffle_ps(XMM4, XMM3, _MM_SHUFFLE(1,0,1,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(3,2,3,2));
+			p0	 = sb[i*2+ 8];
+			p1	 = sb[i*2+10];
+			XMM1	 = XMM0;
+			XMM3	 = XMM2;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(3,1,3,1));
+			XMM7	 = _mm_sub_ps(XMM7, XMM6);
+			p2	 = sb[i*2+12];
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(2,0,2,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(3,1,3,1));
+			TN0.ps	 = XMM7;
+			p3	 = sb[i*2+14];
+			XMM4	 = XMM2;
+			XMM5	 = XMM0;
+			XMM6	 = XMM3;
+			XMM7	 = XMM0;
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM5	 = _mm_mul_ps(XMM5, XMM3);
+			XMM3	 = TN0.ps;
+			XMM6	 = _mm_mul_ps(XMM6, XMM3);
+			XMM1	 = _mm_mul_ps(XMM1, XMM3);
+			XMM3	 = _mm_load_ps(findex+i   );
+			XMM7	 = _mm_mul_ps(XMM7, XMM2);
+			XMM2	 = XXYY[p0];
+			XMM0	 = _mm_mul_ps(XMM0, XMM0);
+			XMM4	 = _mm_sub_ps(XMM4, XMM5);
+			XMM5	 = XXYY[p1];
+			XMM6	 = _mm_sub_ps(XMM6, XMM7);
+			XMM7	 = XXYY[p2];
+			XMM1	 = _mm_sub_ps(XMM1, XMM0);
+			XMM0	 = XXYY[p3];
+			XMM6	 = _mm_mul_ps(XMM6, XMM3);
+			XMM3	 = _mm_rcp_ps(XMM1);
+			TN0.sf[0]	 = N[p0];
+			TN0.sf[1]	 = N[p1];
+			XMM4	 = _mm_add_ps(XMM4, XMM6);
+			XMM1	 = _mm_mul_ps(XMM1, XMM3);
+			TN0.sf[2]	 = N[p2];
+			TN0.sf[3]	 = N[p3];
+			XMM1	 = _mm_mul_ps(XMM1, XMM3);
+			p0	 = sb[i*2+ 9];
+			p1	 = sb[i*2+11];
+			XMM3	 = _mm_add_ps(XMM3, XMM3);
+			p2	 = sb[i*2+13];
+			p3	 = sb[i*2+15];
+			XMM3	 = _mm_sub_ps(XMM3, XMM1);
+			XMM1	 = _mm_load_ps(PFV_0);
+			XMM6	 = XXYY[p0];
+			XMM4	 = _mm_mul_ps(XMM4, XMM3);
+			XMM3	 = OFFSET;
+			XMM4	 = _mm_max_ps(XMM4, XMM1);
+			XMM1	 = XXYY[p1];
+			XMM4	 = _mm_sub_ps(XMM4, XMM3);
+			XMM3	 = XXYY[p2];
+			_mm_store_ps(noise+i   , XMM4);
+			XMM4	 = XXYY[p3];
+			XMM2	 = _mm_sub_ps(XMM2, XMM6);
+			XMM5	 = _mm_sub_ps(XMM5, XMM1);
+			XMM7	 = _mm_sub_ps(XMM7, XMM3);
+			XMM0	 = _mm_sub_ps(XMM0, XMM4);
+			TN1.sf[0]	 = N[p0];
+			TN1.sf[1]	 = N[p1];
+			TN1.sf[2]	 = N[p2];
+			TN1.sf[3]	 = N[p3];
+			XMM6	 = XMM2;
+			XMM1	 = XMM7;
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(1,0,1,0));
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM5, _MM_SHUFFLE(3,2,3,2));
+			XMM4	 = TN0.ps;
+			XMM3	 = TN1.ps;
+			XMM7	 = _mm_shuffle_ps(XMM7, XMM0, _MM_SHUFFLE(1,0,1,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM0, _MM_SHUFFLE(3,2,3,2));
+			XMM4	 = _mm_sub_ps(XMM4, XMM3);
+			XMM5	 = XMM2;
+			XMM0	 = XMM6;
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM7, _MM_SHUFFLE(2,0,2,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(3,1,3,1));
+			TN0.ps	 = XMM4;
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM1, _MM_SHUFFLE(2,0,2,0));
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(3,1,3,1));
+			XMM7	 = XMM6;
+			XMM1	 = XMM2;
+			XMM3	 = XMM0;
+			XMM4	 = XMM2;
+			XMM7	 = _mm_mul_ps(XMM7, XMM5);
+			XMM1	 = _mm_mul_ps(XMM1, XMM0);
+			XMM0	 = TN0.ps;
+			XMM3	 = _mm_mul_ps(XMM3, XMM0);
+			XMM5	 = _mm_mul_ps(XMM5, XMM0);
+			XMM0	 = _mm_load_ps(findex+i+ 4);
+			XMM4	 = _mm_mul_ps(XMM4, XMM6);
+			XMM2	 = _mm_mul_ps(XMM2, XMM2);
+			XMM7	 = _mm_sub_ps(XMM7, XMM1);
+			XMM3	 = _mm_sub_ps(XMM3, XMM4);
+			XMM5	 = _mm_sub_ps(XMM5, XMM2);
+			XMM3	 = _mm_mul_ps(XMM3, XMM0);
+			XMM0	 = _mm_rcp_ps(XMM5);
+			XMM7	 = _mm_add_ps(XMM7, XMM3);
+			XMM5	 = _mm_mul_ps(XMM5, XMM0);
+			XMM5	 = _mm_mul_ps(XMM5, XMM0);
+			XMM0	 = _mm_add_ps(XMM0, XMM0);
+			XMM0	 = _mm_sub_ps(XMM0, XMM5);
+			XMM5	 = _mm_load_ps(PFV_0);
+			XMM7	 = _mm_mul_ps(XMM7, XMM0);
+			XMM0	 = OFFSET;
+			XMM7	 = _mm_max_ps(XMM7, XMM5);
+			XMM7	 = _mm_sub_ps(XMM7, XMM0);
+			_mm_store_ps(noise+i+ 4, XMM7);
+		}
+		for(;i<p->midpoint2_4;i+=4)
+		{
+			register __m128	XMM0, XMM1, XMM2, XMM3;
+			register __m128	XMM4, XMM5, XMM6, XMM7;
+			__m128x	TN0, TN1;
+			int	p0, p1, p2, p3;
+			p0	 = sb[i*2   ];
+			p1	 = sb[i*2+ 2];
+			p2	 = sb[i*2+ 4];
+			p3	 = sb[i*2+ 6];
+			
+			XMM0	 = XXYY[p0];
+			XMM1	 = XXYY[p1];
+			XMM4	 = XXYY[p2];
+			XMM3	 = XXYY[p3];
+			
+			TN0.sf[0]	 = N[p0];
+			TN0.sf[1]	 = N[p1];
+			TN0.sf[2]	 = N[p2];
+			TN0.sf[3]	 = N[p3];
+			
+			p0	 = sb[i*2+ 1];
+			p1	 = sb[i*2+ 3];
+			p2	 = sb[i*2+ 5];
+			p3	 = sb[i*2+ 7];
+			
+			XMM2	 = XXYY[p0];
+			XMM5	 = XXYY[p1];
+			XMM6	 = XXYY[p2];
+			XMM7	 = XXYY[p3];
+
+			XMM0	 = _mm_sub_ps(XMM0, XMM2);
+			XMM1	 = _mm_sub_ps(XMM1, XMM5);
+			XMM4	 = _mm_sub_ps(XMM4, XMM6);
+			XMM3	 = _mm_sub_ps(XMM3, XMM7);
+			
+			XMM2	 = XMM0;
+			XMM5	 = XMM4;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(1,0,1,0));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM1, _MM_SHUFFLE(3,2,3,2));
+			TN1.sf[0]	 = N[p0];
+			TN1.sf[1]	 = N[p1];
+			XMM7	 = TN0.ps;
+			XMM4	 = _mm_shuffle_ps(XMM4, XMM3, _MM_SHUFFLE(1,0,1,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(3,2,3,2));
+			TN1.sf[2]	 = N[p2];
+			TN1.sf[3]	 = N[p3];
+			XMM1	 = XMM0;
+			XMM3	 = XMM2;
+			XMM6	 = TN1.ps;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(3,1,3,1));
+			XMM7	 = _mm_sub_ps(XMM7, XMM6);
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(2,0,2,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(3,1,3,1));
+			TN0.ps	 = XMM7;
+			XMM4	 = XMM2;
+			XMM5	 = XMM0;
+			XMM6	 = XMM3;
+			XMM7	 = XMM0;
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM5	 = _mm_mul_ps(XMM5, XMM3);
+			XMM3	 = TN0.ps;
+			XMM6	 = _mm_mul_ps(XMM6, XMM3);
+			XMM1	 = _mm_mul_ps(XMM1, XMM3);
+			XMM3	 = _mm_load_ps(findex+i   );
+			XMM7	 = _mm_mul_ps(XMM7, XMM2);
+			XMM0	 = _mm_mul_ps(XMM0, XMM0);
+			XMM4	 = _mm_sub_ps(XMM4, XMM5);
+			XMM6	 = _mm_sub_ps(XMM6, XMM7);
+			XMM1	 = _mm_sub_ps(XMM1, XMM0);
+			XMM6	 = _mm_mul_ps(XMM6, XMM3);
+			XMM3	 = _mm_rcp_ps(XMM1);
+			XMM4	 = _mm_add_ps(XMM4, XMM6);
+			XMM1	 = _mm_mul_ps(XMM1, XMM3);
+			XMM1	 = _mm_mul_ps(XMM1, XMM3);
+			XMM3	 = _mm_add_ps(XMM3, XMM3);
+			XMM3	 = _mm_sub_ps(XMM3, XMM1);
+			XMM1	 = _mm_load_ps(PFV_0);
+			XMM4	 = _mm_mul_ps(XMM4, XMM3);
+			XMM3	 = OFFSET;
+			XMM4	 = _mm_max_ps(XMM4, XMM1);
+			XMM4	 = _mm_sub_ps(XMM4, XMM3);
+			_mm_store_ps(noise+i   , XMM4);
+		}
+		if(i!=n)
+		{
+			__m128	XMM0, XMM1, XMM4, XMM3;
+			__m128x	TN, TN1;
+			int	p0, p1, p2;
+			switch(p->midpoint2%4)
+			{
+				case 0:
+					{
+						lo	 = sb[i*2-1];
+						hi	 = sb[i*2-2];
+						
+						tN	 = N[hi] - N[lo];
+						tX	 = xxyy[hi*4  ] - xxyy[lo*4  ];
+						tXX	 = xxyy[hi*4+1] - xxyy[lo*4+1];
+						tY	 = xxyy[hi*4+2] - xxyy[lo*4+2];
+						tXY	 = xxyy[hi*4+3] - xxyy[lo*4+3];
+						
+						A	 = tY * tXX - tX * tXY;
+						B	 = tN * tXY - tX * tY;
+						D	 = tN * tXX - tX * tX;
+						PA	 = _mm_set_ps1(A);
+						PB	 = _mm_set_ps1(B);
+						PD	 = _mm_set_ps1(1.f/D);
+					}
+					break;
+				case 1:
+					{
+						p0	 = sb[i*2  ];
+						
+						XMM0	 = XXYY[p0];
+						
+						TN.ps	 = _mm_set_ps1(N[p0]);
+						
+						p0	 = sb[i*2+1];
+						
+						XMM1	 =
+						XMM4	 =
+						XMM3	 =
+						XMM0	 = _mm_sub_ps(XMM0, XXYY[p0]);
+						
+						TN1.ps	 = _mm_set_ps1(N[p0]);
+						
+						TN.ps	 = _mm_sub_ps(TN.ps, TN1.ps);
+						
+						bark_noise_hybridmp_SSE_SUBC2();
+						XMM4	 = _mm_max_ps(XMM4, PM128(PFV_0));
+						XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+						_mm_store_ps(noise+i  , XMM4);
+						i	+= 4;
+						PA		 = _mm_shuffle_ps(PA, PA, _MM_SHUFFLE(0,0,0,0));
+						PB		 = _mm_shuffle_ps(PB, PB, _MM_SHUFFLE(0,0,0,0));
+						PD		 = _mm_shuffle_ps(PD, PD, _MM_SHUFFLE(0,0,0,0));
+					}
+					break;
+				case 2:
+					{
+						p0	 = sb[i*2  ];
+						p1	 = sb[i*2+2];
+						
+						XMM0	 = XXYY[p0];
+						XMM1	 = XXYY[p1];
+						
+						TN.sf[0]	 = N[p0];
+						TN.sf[1]	 =
+						TN.sf[2]	 =
+						TN.sf[3]	 = N[p1];
+						
+						p0	 = sb[i*2+1];
+						p1	 = sb[i*2+3];
+						
+						XMM0	 = _mm_sub_ps(XMM0, XXYY[p0]);
+						XMM4	 =
+						XMM3	 =
+						XMM1	 = _mm_sub_ps(XMM1, XXYY[p1]);
+						
+						TN1.sf[0]	 = N[p0];
+						TN1.sf[1]	 =
+						TN1.sf[2]	 =
+						TN1.sf[3]	 = N[p1];
+						
+						TN.ps	 = _mm_sub_ps(TN.ps, TN1.ps);
+						
+						bark_noise_hybridmp_SSE_SUBC2();
+						XMM4	 = _mm_max_ps(XMM4, PM128(PFV_0));
+						XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+						_mm_store_ps(noise+i  , XMM4);
+						i	+= 4;
+						PA		 = _mm_shuffle_ps(PA, PA, _MM_SHUFFLE(1,1,1,1));
+						PB		 = _mm_shuffle_ps(PB, PB, _MM_SHUFFLE(1,1,1,1));
+						PD		 = _mm_shuffle_ps(PD, PD, _MM_SHUFFLE(1,1,1,1));
+					}
+					break;
+				case 3:
+					{
+						p0	 = sb[i*2  ];
+						p1	 = sb[i*2+2];
+						p2	 = sb[i*2+4];
+						
+						XMM0	 = XXYY[p0];
+						XMM1	 = XXYY[p1];
+						XMM4	 = XXYY[p2];
+						
+						TN.sf[0]	 = N[p0];
+						TN.sf[1]	 = N[p1];
+						TN.sf[2]	 =
+						TN.sf[3]	 = N[p2];
+						
+						p0	 = sb[i*2+1];
+						p1	 = sb[i*2+3];
+						p2	 = sb[i*2+5];
+						
+						XMM0	 = _mm_sub_ps(XMM0, XXYY[p0]);
+						XMM1	 = _mm_sub_ps(XMM1, XXYY[p1]);
+						XMM3	 =
+						XMM4	 = _mm_sub_ps(XMM4, XXYY[p2]);
+						
+						TN1.sf[0]	 = N[p0];
+						TN1.sf[1]	 = N[p1];
+						TN1.sf[2]	 =
+						TN1.sf[3]	 = N[p2];
+						
+						TN.ps	 = _mm_sub_ps(TN.ps, TN1.ps);
+						
+						bark_noise_hybridmp_SSE_SUBC2();
+						XMM4	 = _mm_max_ps(XMM4, PM128(PFV_0));
+						XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+						_mm_store_ps(noise+i  , XMM4);
+						i	+= 4;
+						PA		 = _mm_shuffle_ps(PA, PA, _MM_SHUFFLE(2,2,2,2));
+						PB		 = _mm_shuffle_ps(PB, PB, _MM_SHUFFLE(2,2,2,2));
+						PD		 = _mm_shuffle_ps(PD, PD, _MM_SHUFFLE(2,2,2,2));
+					}
+					break;
+			}
+		}
+	}
+	if(i<n)
+	{
+		__m128	XMM0	 = PA;
+		__m128	XMM1	 = PB;
+		__m128	XMM2	 = _mm_set_ps1(-offset);
+		XMM0	 = _mm_mul_ps(XMM0, PD);
+		XMM1	 = _mm_mul_ps(XMM1, PD);
+		XMM0	 = _mm_sub_ps(XMM0, OFFSET);
+		if(i%8!=0)
+		{
+			__m128	XMM4	 = _mm_load_ps(findex+i   );
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM4	 = _mm_add_ps(XMM4, XMM0);
+			XMM4	 = _mm_max_ps(XMM4, XMM2);
+			_mm_store_ps(noise+i  , XMM4);
+			i	+= 4;
+		}
+		if(i%16!=0)
+		{
+			__m128	XMM4	 = _mm_load_ps(findex+i   );
+			__m128	XMM5	 = _mm_load_ps(findex+i+ 4);
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM5	 = _mm_mul_ps(XMM5, XMM1);
+			XMM4	 = _mm_add_ps(XMM4, XMM0);
+			XMM5	 = _mm_add_ps(XMM5, XMM0);
+			XMM4	 = _mm_max_ps(XMM4, XMM2);
+			XMM5	 = _mm_max_ps(XMM5, XMM2);
+			_mm_store_ps(noise+i  , XMM4);
+			_mm_store_ps(noise+i+4, XMM5);
+			i	+= 8;
+		}
+		for(;i<n;i+=16)
+		{
+			__m128	XMM4	 = _mm_load_ps(findex+i   );
+			__m128	XMM5	 = _mm_load_ps(findex+i+ 4);
+			__m128	XMM6	 = _mm_load_ps(findex+i+ 8);
+			__m128	XMM7	 = _mm_load_ps(findex+i+12);
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM5	 = _mm_mul_ps(XMM5, XMM1);
+			XMM6	 = _mm_mul_ps(XMM6, XMM1);
+			XMM7	 = _mm_mul_ps(XMM7, XMM1);
+			XMM4	 = _mm_add_ps(XMM4, XMM0);
+			XMM5	 = _mm_add_ps(XMM5, XMM0);
+			XMM6	 = _mm_add_ps(XMM6, XMM0);
+			XMM7	 = _mm_add_ps(XMM7, XMM0);
+			XMM4	 = _mm_max_ps(XMM4, XMM2);
+			XMM5	 = _mm_max_ps(XMM5, XMM2);
+			XMM6	 = _mm_max_ps(XMM6, XMM2);
+			XMM7	 = _mm_max_ps(XMM7, XMM2);
+			_mm_store_ps(noise+i   , XMM4);
+			_mm_store_ps(noise+i+ 4, XMM5);
+			_mm_store_ps(noise+i+ 8, XMM6);
+			_mm_store_ps(noise+i+12, XMM7);
+		}
+	}
+
+	if (fixed <= 0) return;
+
+	midpoint1	 = (fixed+1)/2;
+	midpoint2	 = n-fixed/2;
+	
+	j	 = midpoint1&(~7);
+	p1	 = fixed / 2;
+	p0	 = p1 - 3;
+	
+	for(i=0;i<j;i+=8)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3;
+		__m128	XMM4, XMM5, XMM6, XMM7;
+		__m128x	TN, TN1;
+
+		XMM5	 = _mm_lddqu_ps(N+p0);
+		XMM0	 = XXYY[p0+3];
+		XMM1	 = XXYY[p0+2];
+		XMM4	 = XXYY[p0+1];
+		XMM3	 = XXYY[p0  ];
+		TN.ps	 = _mm_shuffle_ps(XMM5, XMM5, _MM_SHUFFLE(0,1,2,3));
+		XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+		XMM1	 = _mm_xor_ps(XMM1, PM128(PCS_RNNR));
+		XMM4	 = _mm_xor_ps(XMM4, PM128(PCS_RNNR));
+		XMM3	 = _mm_xor_ps(XMM3, PM128(PCS_RNNR));
+		XMM5	 = _mm_lddqu_ps(N+p1);
+		XMM0	 = _mm_add_ps(XMM0, XXYY[p1  ]);
+		XMM1	 = _mm_add_ps(XMM1, XXYY[p1+1]);
+		XMM4	 = _mm_add_ps(XMM4, XXYY[p1+2]);
+		XMM3	 = _mm_add_ps(XMM3, XXYY[p1+3]);
+		TN.ps	 = _mm_add_ps(TN.ps, XMM5);
+		XMM2 = XMM0;
+		XMM5 = XMM4;
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(1,0,1,0));
+		XMM2	 = _mm_shuffle_ps(XMM2, XMM1, _MM_SHUFFLE(3,2,3,2));
+		XMM4	 = _mm_shuffle_ps(XMM4, XMM3, _MM_SHUFFLE(1,0,1,0));
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(3,2,3,2));
+		XMM1 = XMM0;
+		XMM3 = XMM2;
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(3,1,3,1));
+		XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(2,0,2,0));
+		XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(3,1,3,1));
+		XMM4 = XMM2;
+		XMM5 = XMM0;
+		XMM6 = XMM3;
+		XMM7 = XMM0;
+		XMM4 = _mm_mul_ps(XMM4, XMM1);
+		XMM5 = _mm_mul_ps(XMM5, XMM3);
+		XMM3 = _mm_load_ps(findex+i);
+		XMM6 = _mm_mul_ps(XMM6, TN.ps);
+		XMM1 = _mm_mul_ps(XMM1, TN.ps);
+		XMM7 = _mm_mul_ps(XMM7, XMM2);
+		XMM2	 = _mm_lddqu_ps(N+p0-4);
+		XMM0 = _mm_mul_ps(XMM0, XMM0);
+		XMM4 = _mm_sub_ps(XMM4, XMM5);
+		XMM5	 = XXYY[p0-1];
+		XMM6 = _mm_sub_ps(XMM6, XMM7);
+		XMM7	 = XXYY[p0-2];
+		XMM1 = _mm_sub_ps(XMM1, XMM0);
+		XMM0	 = XXYY[p0-3];
+		XMM6 = _mm_mul_ps(XMM6, XMM3);
+		XMM3 = _mm_rcp_ps(XMM1);
+		XMM4 = _mm_add_ps(XMM4, XMM6);
+		XMM6	 = XXYY[p0-4];
+		XMM1 = _mm_mul_ps(XMM1, XMM3);
+		TN1.ps	 = _mm_shuffle_ps(XMM2, XMM2, _MM_SHUFFLE(0,1,2,3));
+		XMM1 = _mm_mul_ps(XMM1, XMM3);
+		XMM5	 = _mm_xor_ps(XMM5, PM128(PCS_RNNR));
+		XMM3 = _mm_add_ps(XMM3, XMM3);
+		XMM7	 = _mm_xor_ps(XMM7, PM128(PCS_RNNR));
+		XMM3 = _mm_sub_ps(XMM3, XMM1);
+		XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+		XMM4 = _mm_mul_ps(XMM4, XMM3);
+		XMM6	 = _mm_xor_ps(XMM6, PM128(PCS_RNNR));
+		XMM2	 = _mm_lddqu_ps(N+p1+4);
+		XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+		XMM5	 = _mm_add_ps(XMM5, XXYY[p1+4]);
+		XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+		XMM7	 = _mm_add_ps(XMM7, XXYY[p1+5]);
+		XMM0	 = _mm_add_ps(XMM0, XXYY[p1+6]);
+		_mm_store_ps(noise+i  , XMM4);
+		XMM6	 = _mm_add_ps(XMM6, XXYY[p1+7]);
+		TN1.ps	 = _mm_add_ps(TN1.ps, XMM2);
+		XMM1 = XMM5;
+		XMM2 = XMM0;
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(1,0,1,0));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM7, _MM_SHUFFLE(3,2,3,2));
+		XMM0	 = _mm_shuffle_ps(XMM0, XMM6, _MM_SHUFFLE(1,0,1,0));
+		XMM2	 = _mm_shuffle_ps(XMM2, XMM6, _MM_SHUFFLE(3,2,3,2));
+		XMM7 = XMM5;
+		XMM6 = XMM1;
+		XMM5	 = _mm_shuffle_ps(XMM5, XMM0, _MM_SHUFFLE(2,0,2,0));
+		XMM7	 = _mm_shuffle_ps(XMM7, XMM0, _MM_SHUFFLE(3,1,3,1));
+		XMM1	 = _mm_shuffle_ps(XMM1, XMM2, _MM_SHUFFLE(2,0,2,0));
+		XMM6	 = _mm_shuffle_ps(XMM6, XMM2, _MM_SHUFFLE(3,1,3,1));
+		XMM0 = XMM1;
+		XMM2 = XMM5;
+		XMM3 = XMM6;
+		XMM4 = XMM5;
+		XMM0 = _mm_mul_ps(XMM0, XMM7);
+		XMM2 = _mm_mul_ps(XMM2, XMM6);
+		XMM6 = _mm_load_ps(findex+i+4);
+		XMM3 = _mm_mul_ps(XMM3, TN1.ps);
+		XMM7 = _mm_mul_ps(XMM7, TN1.ps);
+		XMM4 = _mm_mul_ps(XMM4, XMM1);
+		XMM5 = _mm_mul_ps(XMM5, XMM5);
+		XMM0 = _mm_sub_ps(XMM0, XMM2);
+		XMM3 = _mm_sub_ps(XMM3, XMM4);
+		XMM7 = _mm_sub_ps(XMM7, XMM5);
+		XMM3 = _mm_mul_ps(XMM3, XMM6);
+		XMM6 = _mm_rcp_ps(XMM7);
+		XMM0 = _mm_add_ps(XMM0, XMM3);
+		XMM7 = _mm_mul_ps(XMM7, XMM6);
+		XMM7 = _mm_mul_ps(XMM7, XMM6);
+		XMM6 = _mm_add_ps(XMM6, XMM6);
+		XMM6 = _mm_sub_ps(XMM6, XMM7);
+		XMM6 = _mm_mul_ps(XMM6, XMM0);
+		XMM6	 = _mm_sub_ps(XMM6, OFFSET);
+		XMM6	 = _mm_min_ps(XMM6, PM128(noise+i+4));
+		_mm_store_ps(noise+i+4, XMM6);
+		p0 -= 8;
+		p1 += 8;
+	}
+	j	 = midpoint1&(~3);
+	for(;i<j;i+=4)
+	{
+		__m128	XMM0, XMM1, XMM4, XMM3, XMM5;
+		__m128x	TN;
+		
+		XMM5	 = _mm_lddqu_ps(N+p0);
+		XMM0	 = XXYY[p0+3];
+		XMM1	 = XXYY[p0+2];
+		XMM4	 = XXYY[p0+1];
+		XMM3	 = XXYY[p0  ];
+		TN.ps	 = _mm_shuffle_ps(XMM5, XMM5, _MM_SHUFFLE(0,1,2,3));
+		
+		XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+		XMM1	 = _mm_xor_ps(XMM1, PM128(PCS_RNNR));
+		XMM4	 = _mm_xor_ps(XMM4, PM128(PCS_RNNR));
+		XMM3	 = _mm_xor_ps(XMM3, PM128(PCS_RNNR));
+		
+		XMM5	 = _mm_lddqu_ps(N+p1);
+		XMM0	 = _mm_add_ps(XMM0, XXYY[p1  ]);
+		XMM1	 = _mm_add_ps(XMM1, XXYY[p1+1]);
+		XMM4	 = _mm_add_ps(XMM4, XXYY[p1+2]);
+		XMM3	 = _mm_add_ps(XMM3, XXYY[p1+3]);
+		
+		TN.ps	 = _mm_add_ps(TN.ps, XMM5);
+		
+		bark_noise_hybridmp_SSE_SUBC();
+		XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+		XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+		_mm_store_ps(noise+i  , XMM4);
+		p0 -= 4;
+		p1 += 4;
+	}
+	if(midpoint2-i<4)
+	{
+		x	 = (float)i;
+		for (;i<midpoint1;i++,x+=1.f)
+		{
+			hi	 = i + fixed / 2;
+			lo	 = hi - fixed;
+	
+			tN	 = N[hi] + N[-lo];
+			tX	 = xxyy[hi*4  ] - xxyy[-lo*4  ];
+			tXX	 = xxyy[hi*4+1] + xxyy[-lo*4+1];
+			tY	 = xxyy[hi*4+2] + xxyy[-lo*4+2];
+			tXY	 = xxyy[hi*4+3] - xxyy[-lo*4+3];
+	
+			A	 = tY * tXX - tX * tXY;
+			B	 = tN * tXY - tX * tY;
+			D	 = tN * tXX - tX * tX;
+			R	 = (A + x * B) / D;
+	
+			if(R - offset < noise[i])
+				noise[i]	 = R - offset;
+		}
+		for (;i<midpoint2;i++,x+=1.f)
+		{
+			hi	 = i + fixed / 2;
+			lo	 = hi - fixed;
+	
+			tN	 = N[hi] - N[lo];
+			tX	 = xxyy[hi*4  ] - xxyy[lo*4  ];
+			tXX	 = xxyy[hi*4+1] - xxyy[lo*4+1];
+			tY	 = xxyy[hi*4+2] - xxyy[lo*4+2];
+			tXY	 = xxyy[hi*4+3] - xxyy[lo*4+3];
+			
+			A	 = tY * tXX - tX * tXY;
+			B	 = tN * tXY - tX * tY;
+			D	 = tN * tXX - tX * tX;
+			R	 = (A + x * B) / D;
+			if(R - offset < noise[i])
+				noise[i]	 = R - offset;
+		}
+		j	 = (i+3)&(~3);
+		j	 = (j>=n)?n:j;
+		for (;i<j;i++,x+=1.f)
+		{
+			R	 = (A + x * B) / D;
+			if(R - offset < noise[i])
+				noise[i]	 = R - offset;
+		}
+		PA	 = _mm_set_ps1(A);
+		PB	 = _mm_set_ps1(B);
+		PD	 = _mm_set_ps1(D);
+	}
+	else
+	{
+		switch(midpoint1%4)
+		{
+			case 0:
+				break;
+			case 1:
+				{
+					__m128	XMM0, XMM1, XMM4, XMM3;
+					__m128x	TN, TN1;
+					int	p0, p1;
+					p0	 = -((i  ) + fixed / 2 - fixed);
+					p1	 = (i+1) + fixed / 2;
+					
+					XMM0	 = XXYY[p0  ];
+					XMM1	 = XXYY[p1  ];
+					XMM4	 = XXYY[p1+1];
+					XMM3	 = XXYY[p1+2];
+					
+					TN.sf[0]	 = N[p0  ];
+					TN.sf[1]	 = N[p1  ];
+					TN.sf[2]	 = N[p1+1];
+					TN.sf[3]	 = N[p1+2];
+					
+					XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+					
+					p0	 = (i  ) + fixed / 2;
+					p1	-= fixed;
+					
+					XMM0	 = _mm_add_ps(XMM0, XXYY[p0  ]);
+					XMM1	 = _mm_sub_ps(XMM1, XXYY[p1  ]);
+					XMM4	 = _mm_sub_ps(XMM4, XXYY[p1+1]);
+					XMM3	 = _mm_sub_ps(XMM3, XXYY[p1+2]);
+					
+					TN1.sf[0]	 = N[p0  ];
+					TN1.sf[1]	 = N[p1  ];
+					TN1.sf[2]	 = N[p1+1];
+					TN1.sf[3]	 = N[p1+2];
+					
+					TN.ps	 = _mm_sub_ps(TN.ps, _mm_xor_ps(TN1.ps, PM128(PCS_NNNR)));
+					
+					bark_noise_hybridmp_SSE_SUBC();
+					XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+					XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+					_mm_store_ps(noise+i  , XMM4);
+					i	+= 4;
+				}
+				break;
+			case 2:
+				{
+					__m128	XMM0, XMM1, XMM4, XMM3;
+					__m128x	TN, TN1;
+					int	p0, p1;
+					p0	 = -((i  ) + fixed / 2 - fixed);
+					p1	 = (i+2) + fixed / 2;
+					
+					XMM0	 = XXYY[p0  ];
+					XMM1	 = XXYY[p0-1];
+					XMM4	 = XXYY[p1  ];
+					XMM3	 = XXYY[p1+1];
+					
+					TN.sf[0]	 = N[p0  ];
+					TN.sf[1]	 = N[p0-1];
+					TN.sf[2]	 = N[p1  ];
+					TN.sf[3]	 = N[p1+1];
+					
+					XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+					XMM1	 = _mm_xor_ps(XMM1, PM128(PCS_RNNR));
+					
+					p0	 = (i  ) + fixed / 2;
+					p1	-= fixed;
+					
+					XMM0	 = _mm_add_ps(XMM0, XXYY[p0  ]);
+					XMM1	 = _mm_add_ps(XMM1, XXYY[p0+1]);
+					XMM4	 = _mm_sub_ps(XMM4, XXYY[p1  ]);
+					XMM3	 = _mm_sub_ps(XMM3, XXYY[p1+1]);
+					
+					TN1.sf[0]	 = N[p0  ];
+					TN1.sf[1]	 = N[p0+1];
+					TN1.sf[2]	 = N[p1  ];
+					TN1.sf[3]	 = N[p1+1];
+					
+					TN.ps	 = _mm_sub_ps(TN.ps, _mm_xor_ps(TN1.ps, PM128(PCS_NNRR)));
+					
+					bark_noise_hybridmp_SSE_SUBC();
+					XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+					XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+					_mm_store_ps(noise+i  , XMM4);
+					i	+= 4;
+				}
+				break;
+			case 3:
+				{
+					__m128	XMM0, XMM1, XMM4, XMM3;
+					__m128x	TN, TN1;
+					int	p0, p1;
+					p0	 = -((i  ) + fixed / 2 - fixed);
+					p1	 = (i+3) + fixed / 2;
+					
+					XMM0	 = XXYY[p0  ];
+					XMM1	 = XXYY[p0-1];
+					XMM4	 = XXYY[p0-2];
+					XMM3	 = XXYY[p1  ];
+					
+					TN.sf[0]	 = N[p0  ];
+					TN.sf[1]	 = N[p0-1];
+					TN.sf[2]	 = N[p0-2];
+					TN.sf[3]	 = N[p1  ];
+					
+					XMM0	 = _mm_xor_ps(XMM0, PM128(PCS_RNNR));
+					XMM1	 = _mm_xor_ps(XMM1, PM128(PCS_RNNR));
+					XMM4	 = _mm_xor_ps(XMM4, PM128(PCS_RNNR));
+					
+					p0	 = (i  ) + fixed / 2;
+					p1	-= fixed;
+					
+					XMM0	 = _mm_add_ps(XMM0, XXYY[p0  ]);
+					XMM1	 = _mm_add_ps(XMM1, XXYY[p0+1]);
+					XMM4	 = _mm_sub_ps(XMM4, XXYY[p0+2]);
+					XMM3	 = _mm_sub_ps(XMM3, XXYY[p1  ]);
+					
+					TN1.sf[0]	 = N[p0  ];
+					TN1.sf[1]	 = N[p0+1];
+					TN1.sf[2]	 = N[p0+2];
+					TN1.sf[3]	 = N[p1  ];
+					
+					TN.ps	 = _mm_sub_ps(TN.ps, _mm_xor_ps(TN1.ps, PM128(PCS_NRRR)));
+					
+					bark_noise_hybridmp_SSE_SUBC();
+					XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+					XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+					_mm_store_ps(noise+i  , XMM4);
+					i	+= 4;
+				}
+				break;
+		}
+		p0	 = i  + fixed / 2;
+		p1	 = p0 - fixed;
+		j	 = ((midpoint2-i)&(~15))+i;
+		for(;i<j;i+=16)
+		{
+			__m128	XMM0, XMM1, XMM2, XMM3;
+			__m128	XMM4, XMM5, XMM6, XMM7;
+			__m128x	TN, TN1;
+			
+			XMM0	 = XXYY[p0   ];
+			XMM1	 = XXYY[p0+ 1];
+			XMM4	 = XXYY[p0+ 2];
+			XMM3	 = XXYY[p0+ 3];
+			TN.ps	 = _mm_lddqu_ps(N+p0   );
+			XMM5	 = _mm_lddqu_ps(N+p1   );
+			XMM0	 = _mm_sub_ps(XMM0, XXYY[p1   ]);
+			XMM1	 = _mm_sub_ps(XMM1, XXYY[p1+ 1]);
+			XMM4	 = _mm_sub_ps(XMM4, XXYY[p1+ 2]);
+			XMM3	 = _mm_sub_ps(XMM3, XXYY[p1+ 3]);
+			TN.ps	 = _mm_sub_ps(TN.ps, XMM5);
+			XMM2 = XMM0;
+			XMM5 = XMM4;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(1,0,1,0));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM1, _MM_SHUFFLE(3,2,3,2));
+			XMM4	 = _mm_shuffle_ps(XMM4, XMM3, _MM_SHUFFLE(1,0,1,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(3,2,3,2));
+			XMM1 = XMM0;
+			XMM3 = XMM2;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(3,1,3,1));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(2,0,2,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(3,1,3,1));
+			XMM4 = XMM2;
+			XMM5 = XMM0;
+			XMM6 = XMM3;
+			XMM7 = XMM0;
+			XMM4 = _mm_mul_ps(XMM4, XMM1);
+			XMM5 = _mm_mul_ps(XMM5, XMM3);
+			XMM3 = _mm_load_ps(findex+i   );
+			XMM6 = _mm_mul_ps(XMM6, TN.ps);
+			XMM1 = _mm_mul_ps(XMM1, TN.ps);
+			XMM7 = _mm_mul_ps(XMM7, XMM2);
+			XMM2	 = XXYY[p0+ 4];
+			XMM0 = _mm_mul_ps(XMM0, XMM0);
+			XMM4 = _mm_sub_ps(XMM4, XMM5);
+			XMM5	 = XXYY[p0+ 5];
+			XMM6 = _mm_sub_ps(XMM6, XMM7);
+			XMM7	 = XXYY[p0+ 6];
+			XMM1 = _mm_sub_ps(XMM1, XMM0);
+			XMM0	 = XXYY[p0+ 7];
+			XMM6 = _mm_mul_ps(XMM6, XMM3);
+
+			TN1.ps	 = _mm_lddqu_ps(N+p0+ 4);
+			XMM3 = _mm_rcp_ps(XMM1);
+			XMM4 = _mm_add_ps(XMM4, XMM6);
+			XMM6	 = _mm_lddqu_ps(N+p1+ 4);
+			XMM1 = _mm_mul_ps(XMM1, XMM3);
+			XMM2	 = _mm_sub_ps(XMM2, XXYY[p1+ 4]);
+			XMM1 = _mm_mul_ps(XMM1, XMM3);
+			XMM5	 = _mm_sub_ps(XMM5, XXYY[p1+ 5]);
+			XMM3 = _mm_add_ps(XMM3, XMM3);
+			XMM7	 = _mm_sub_ps(XMM7, XXYY[p1+ 6]);
+			XMM3 = _mm_sub_ps(XMM3, XMM1);
+			XMM0	 = _mm_sub_ps(XMM0, XXYY[p1+ 7]);
+			XMM4 = _mm_mul_ps(XMM4, XMM3);
+			TN1.ps	 = _mm_sub_ps(TN1.ps, XMM6);
+			XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+			XMM1 = XMM2;
+			XMM4	 = _mm_min_ps(XMM4, PM128(noise+i   ));
+			XMM6 = XMM7;
+			_mm_store_ps(noise+i   , XMM4);
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(1,0,1,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM5, _MM_SHUFFLE(3,2,3,2));
+			XMM7	 = _mm_shuffle_ps(XMM7, XMM0, _MM_SHUFFLE(1,0,1,0));
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM0, _MM_SHUFFLE(3,2,3,2));
+			XMM5 = XMM2;
+			XMM0 = XMM1;
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM7, _MM_SHUFFLE(2,0,2,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(3,1,3,1));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM6, _MM_SHUFFLE(2,0,2,0));
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM6, _MM_SHUFFLE(3,1,3,1));
+			XMM7 = XMM1;
+			XMM6 = XMM2;
+			XMM3 = XMM0;
+			XMM4 = XMM2;
+			XMM7 = _mm_mul_ps(XMM7, XMM5);
+			XMM6 = _mm_mul_ps(XMM6, XMM0);
+			XMM0 = _mm_load_ps(findex+i+ 4);
+			XMM3 = _mm_mul_ps(XMM3, TN1.ps);
+			XMM5 = _mm_mul_ps(XMM5, TN1.ps);
+			XMM4 = _mm_mul_ps(XMM4, XMM1);
+			XMM1	 = XXYY[p0+ 8];
+			XMM2 = _mm_mul_ps(XMM2, XMM2);
+			XMM7 = _mm_sub_ps(XMM7, XMM6);
+			XMM6	 = XXYY[p0+ 9];
+			XMM3 = _mm_sub_ps(XMM3, XMM4);
+			XMM4	 = XXYY[p0+10];
+			XMM5 = _mm_sub_ps(XMM5, XMM2);
+			XMM2	 = XXYY[p0+11];
+			XMM3 = _mm_mul_ps(XMM3, XMM0);
+			TN.ps	 = _mm_lddqu_ps(N+p0+ 8);
+			XMM0 = _mm_rcp_ps(XMM5);
+			XMM7 = _mm_add_ps(XMM7, XMM3);
+			XMM3	 = _mm_lddqu_ps(N+p1+ 8);
+			XMM5 = _mm_mul_ps(XMM5, XMM0);
+			XMM1	 = _mm_sub_ps(XMM1, XXYY[p1+ 8]);
+			XMM5 = _mm_mul_ps(XMM5, XMM0);
+			XMM6	 = _mm_sub_ps(XMM6, XXYY[p1+ 9]);
+			XMM0 = _mm_add_ps(XMM0, XMM0);
+			XMM4	 = _mm_sub_ps(XMM4, XXYY[p1+10]);
+			XMM0 = _mm_sub_ps(XMM0, XMM5);
+			XMM2	 = _mm_sub_ps(XMM2, XXYY[p1+11]);
+			XMM7 = _mm_mul_ps(XMM7, XMM0);
+			TN.ps	 = _mm_sub_ps(TN.ps, XMM3);
+			XMM7	 = _mm_sub_ps(XMM7, OFFSET);
+			XMM5 = XMM1;
+			XMM7	 = _mm_min_ps(XMM7, PM128(noise+i+ 4));
+			XMM3 = XMM4;
+			_mm_store_ps(noise+i+ 4, XMM7);
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM6, _MM_SHUFFLE(1,0,1,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM6, _MM_SHUFFLE(3,2,3,2));
+			XMM4	 = _mm_shuffle_ps(XMM4, XMM2, _MM_SHUFFLE(1,0,1,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM2, _MM_SHUFFLE(3,2,3,2));
+			XMM6 = XMM1;
+			XMM2 = XMM5;
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(2,0,2,0));
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM4, _MM_SHUFFLE(3,1,3,1));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(2,0,2,0));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM3, _MM_SHUFFLE(3,1,3,1));
+			XMM4 = XMM5;
+			XMM3 = XMM1;
+			XMM0 = XMM2;
+			XMM7 = XMM1;
+			XMM4 = _mm_mul_ps(XMM4, XMM6);
+			XMM3 = _mm_mul_ps(XMM3, XMM2);
+			XMM2 = _mm_load_ps(findex+i+ 8);
+			XMM0 = _mm_mul_ps(XMM0, TN.ps);
+			XMM6 = _mm_mul_ps(XMM6, TN.ps);
+			XMM7 = _mm_mul_ps(XMM7, XMM5);
+			XMM5	 = XXYY[p0+12];
+			XMM1 = _mm_mul_ps(XMM1, XMM1);
+			XMM4 = _mm_sub_ps(XMM4, XMM3);
+			XMM3	 = XXYY[p0+13];
+			XMM0 = _mm_sub_ps(XMM0, XMM7);
+			XMM7	 = XXYY[p0+14];
+			XMM6 = _mm_sub_ps(XMM6, XMM1);
+			XMM1	 = XXYY[p0+15];
+			XMM0 = _mm_mul_ps(XMM0, XMM2);
+			TN1.ps	 = _mm_lddqu_ps(N+p0+12);
+			XMM2 = _mm_rcp_ps(XMM6);
+			XMM4 = _mm_add_ps(XMM4, XMM0);
+			XMM0	 = _mm_lddqu_ps(N+p1+12);
+			XMM6 = _mm_mul_ps(XMM6, XMM2);
+			XMM5	 = _mm_sub_ps(XMM5, XXYY[p1+12]);
+			XMM6 = _mm_mul_ps(XMM6, XMM2);
+			XMM3	 = _mm_sub_ps(XMM3, XXYY[p1+13]);
+			XMM2 = _mm_add_ps(XMM2, XMM2);
+			XMM7	 = _mm_sub_ps(XMM7, XXYY[p1+14]);
+			XMM2 = _mm_sub_ps(XMM2, XMM6);
+			XMM1	 = _mm_sub_ps(XMM1, XXYY[p1+15]);
+			XMM4 = _mm_mul_ps(XMM4, XMM2);
+			TN1.ps	 = _mm_sub_ps(TN1.ps, XMM0);
+			XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+			XMM6 = XMM5;
+			XMM4	 = _mm_min_ps(XMM4, PM128(noise+i+ 8));
+			XMM0 = XMM7;
+			_mm_store_ps(noise+i+ 8, XMM4);
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(1,0,1,0));
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM3, _MM_SHUFFLE(3,2,3,2));
+			XMM7	 = _mm_shuffle_ps(XMM7, XMM1, _MM_SHUFFLE(1,0,1,0));
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(3,2,3,2));
+			XMM3 = XMM5;
+			XMM1 = XMM6;
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(2,0,2,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM7, _MM_SHUFFLE(3,1,3,1));
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM0, _MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM0, _MM_SHUFFLE(3,1,3,1));
+			XMM7 = XMM6;
+			XMM0 = XMM5;
+			XMM2 = XMM1;
+			XMM4 = XMM5;
+			XMM7 = _mm_mul_ps(XMM7, XMM3);
+			XMM0 = _mm_mul_ps(XMM0, XMM1);
+			XMM1 = _mm_load_ps(findex+i+12);
+			XMM2 = _mm_mul_ps(XMM2, TN1.ps);
+			XMM3 = _mm_mul_ps(XMM3, TN1.ps);
+			XMM4 = _mm_mul_ps(XMM4, XMM6);
+			XMM5 = _mm_mul_ps(XMM5, XMM5);
+			XMM7 = _mm_sub_ps(XMM7, XMM0);
+			XMM2 = _mm_sub_ps(XMM2, XMM4);
+			XMM3 = _mm_sub_ps(XMM3, XMM5);
+			XMM2 = _mm_mul_ps(XMM2, XMM1);
+			XMM1 = _mm_rcp_ps(XMM3);
+			XMM7 = _mm_add_ps(XMM7, XMM2);
+			XMM3 = _mm_mul_ps(XMM3, XMM1);
+			XMM3 = _mm_mul_ps(XMM3, XMM1);
+			XMM1 = _mm_add_ps(XMM1, XMM1);
+			XMM1 = _mm_sub_ps(XMM1, XMM3);
+			XMM7 = _mm_mul_ps(XMM7, XMM1);
+			XMM7	 = _mm_sub_ps(XMM7, OFFSET);
+			XMM7	 = _mm_min_ps(XMM7, PM128(noise+i+12));
+			_mm_store_ps(noise+i+12, XMM7);
+
+			p0 += 16;
+			p1 += 16;
+		}
+		j	 = ((midpoint2-i)&(~7))+i;
+		for(;i<j;i+=8)
+		{
+			__m128	XMM0, XMM1, XMM2, XMM3;
+			__m128	XMM4, XMM5, XMM6, XMM7;
+			__m128x	TN, TN1;
+			
+			XMM0	 = XXYY[p0  ];
+			XMM1	 = XXYY[p0+1];
+			XMM4	 = XXYY[p0+2];
+			XMM3	 = XXYY[p0+3];
+			TN.ps	 = _mm_lddqu_ps(N+p0   );
+			XMM5	 = _mm_lddqu_ps(N+p1   );
+			XMM0	 = _mm_sub_ps(XMM0, XXYY[p1  ]);
+			XMM1	 = _mm_sub_ps(XMM1, XXYY[p1+1]);
+			XMM4	 = _mm_sub_ps(XMM4, XXYY[p1+2]);
+			XMM3	 = _mm_sub_ps(XMM3, XXYY[p1+3]);
+			TN.ps	 = _mm_sub_ps(TN.ps, XMM5);
+			XMM2 = XMM0;
+			XMM5 = XMM4;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM1, _MM_SHUFFLE(1,0,1,0));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM1, _MM_SHUFFLE(3,2,3,2));
+			XMM4	 = _mm_shuffle_ps(XMM4, XMM3, _MM_SHUFFLE(1,0,1,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM3, _MM_SHUFFLE(3,2,3,2));
+			XMM1 = XMM0;
+			XMM3 = XMM2;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM4, _MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4, _MM_SHUFFLE(3,1,3,1));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(2,0,2,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5, _MM_SHUFFLE(3,1,3,1));
+			XMM4 = XMM2;
+			XMM5 = XMM0;
+			XMM6 = XMM3;
+			XMM7 = XMM0;
+			XMM4 = _mm_mul_ps(XMM4, XMM1);
+			XMM5 = _mm_mul_ps(XMM5, XMM3);
+			XMM3 = _mm_load_ps(findex+i  );
+			XMM6 = _mm_mul_ps(XMM6, TN.ps);
+			XMM1 = _mm_mul_ps(XMM1, TN.ps);
+			XMM7 = _mm_mul_ps(XMM7, XMM2);
+			XMM2	 = XXYY[p0+4];
+			XMM0 = _mm_mul_ps(XMM0, XMM0);
+			XMM4 = _mm_sub_ps(XMM4, XMM5);
+			XMM5	 = XXYY[p0+5];
+			XMM6 = _mm_sub_ps(XMM6, XMM7);
+			XMM7	 = XXYY[p0+6];
+			XMM1 = _mm_sub_ps(XMM1, XMM0);
+			XMM0	 = XXYY[p0+7];
+			XMM6 = _mm_mul_ps(XMM6, XMM3);
+			TN1.ps	 = _mm_lddqu_ps(N+p0+ 4);
+			XMM3 = _mm_rcp_ps(XMM1);
+			XMM4 = _mm_add_ps(XMM4, XMM6);
+			XMM6	 = _mm_lddqu_ps(N+p1+ 4);
+			XMM1 = _mm_mul_ps(XMM1, XMM3);
+			XMM2	 = _mm_sub_ps(XMM2, XXYY[p1+4]);
+			XMM1 = _mm_mul_ps(XMM1, XMM3);
+			XMM5	 = _mm_sub_ps(XMM5, XXYY[p1+5]);
+			XMM3 = _mm_add_ps(XMM3, XMM3);
+			XMM7	 = _mm_sub_ps(XMM7, XXYY[p1+6]);
+			XMM3 = _mm_sub_ps(XMM3, XMM1);
+			XMM0	 = _mm_sub_ps(XMM0, XXYY[p1+7]);
+			XMM4 = _mm_mul_ps(XMM4, XMM3);
+			TN1.ps	 = _mm_sub_ps(TN1.ps, XMM6);
+			XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+			XMM1 = XMM2;
+			XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+			XMM6 = XMM7;
+			_mm_store_ps(noise+i  , XMM4);
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5, _MM_SHUFFLE(1,0,1,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM5, _MM_SHUFFLE(3,2,3,2));
+			XMM7	 = _mm_shuffle_ps(XMM7, XMM0, _MM_SHUFFLE(1,0,1,0));
+			XMM6	 = _mm_shuffle_ps(XMM6, XMM0, _MM_SHUFFLE(3,2,3,2));
+			XMM5 = XMM2;
+			XMM0 = XMM1;
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM7, _MM_SHUFFLE(2,0,2,0));
+			XMM5	 = _mm_shuffle_ps(XMM5, XMM7, _MM_SHUFFLE(3,1,3,1));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM6, _MM_SHUFFLE(2,0,2,0));
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM6, _MM_SHUFFLE(3,1,3,1));
+			XMM7 = XMM1;
+			XMM6 = XMM2;
+			XMM3 = XMM0;
+			XMM4 = XMM2;
+			XMM7 = _mm_mul_ps(XMM7, XMM5);
+			XMM6 = _mm_mul_ps(XMM6, XMM0);
+			XMM0 = _mm_load_ps(findex+i+4);
+			XMM3 = _mm_mul_ps(XMM3, TN1.ps);
+			XMM5 = _mm_mul_ps(XMM5, TN1.ps);
+			XMM4 = _mm_mul_ps(XMM4, XMM1);
+			XMM2 = _mm_mul_ps(XMM2, XMM2);
+			XMM7 = _mm_sub_ps(XMM7, XMM6);
+			XMM3 = _mm_sub_ps(XMM3, XMM4);
+			XMM5 = _mm_sub_ps(XMM5, XMM2);
+			XMM3 = _mm_mul_ps(XMM3, XMM0);
+			XMM0 = _mm_rcp_ps(XMM5);
+			XMM7 = _mm_add_ps(XMM7, XMM3);
+			XMM5 = _mm_mul_ps(XMM5, XMM0);
+			XMM5 = _mm_mul_ps(XMM5, XMM0);
+			XMM0 = _mm_add_ps(XMM0, XMM0);
+			XMM0 = _mm_sub_ps(XMM0, XMM5);
+			XMM7 = _mm_mul_ps(XMM7, XMM0);
+			XMM7	 = _mm_sub_ps(XMM7, OFFSET);
+			XMM7	 = _mm_min_ps(XMM7, PM128(noise+i+4));
+			_mm_store_ps(noise+i+4, XMM7);
+
+			p0 += 8;
+			p1 += 8;
+		}
+		j	 = midpoint2&(~3);
+		for(;i<j;i+=4)
+		{
+			__m128	XMM0, XMM1, XMM4, XMM3;
+			__m128x	TN;
+			__m128	XMM5;
+			
+			XMM0	 = XXYY[p0  ];
+			XMM1	 = XXYY[p0+1];
+			XMM4	 = XXYY[p0+2];
+			XMM3	 = XXYY[p0+3];
+			TN.ps	 = _mm_lddqu_ps(N+p0   );
+			XMM5	 = _mm_lddqu_ps(N+p1   );
+			XMM0	 = _mm_sub_ps(XMM0, XXYY[p1  ]);
+			XMM1	 = _mm_sub_ps(XMM1, XXYY[p1+1]);
+			XMM4	 = _mm_sub_ps(XMM4, XXYY[p1+2]);
+			XMM3	 = _mm_sub_ps(XMM3, XXYY[p1+3]);
+			
+			TN.ps	 = _mm_sub_ps(TN.ps, XMM5);
+			
+			bark_noise_hybridmp_SSE_SUBC();
+			XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+			XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+			_mm_store_ps(noise+i  , XMM4);
+			p0 += 4;
+			p1 += 4;
+		}
+		if(i!=n)
+		{
+			switch(midpoint2%4)
+			{
+				case 0:
+					{
+						hi	 = (i-1) + fixed / 2;
+						lo	 = hi - fixed;
+						
+						tN	 = N[hi] - N[lo];
+						tX	 = xxyy[hi*4  ] - xxyy[lo*4  ];
+						tXX	 = xxyy[hi*4+1] - xxyy[lo*4+1];
+						tY	 = xxyy[hi*4+2] - xxyy[lo*4+2];
+						tXY	 = xxyy[hi*4+3] - xxyy[lo*4+3];
+						
+						A	 = tY * tXX - tX * tXY;
+						B	 = tN * tXY - tX * tY;
+						D	 = tN * tXX - tX * tX;
+						PA	 = _mm_set_ps1(A);
+						PB	 = _mm_set_ps1(B);
+						PD	 = _mm_set_ps1(1.f/D);
+					}
+					break;
+				case 1:
+					{
+						__m128	XMM0, XMM1, XMM4, XMM3;
+						__m128x	TN, TN1;
+						int p0	 = (i  ) + fixed / 2;
+						
+						XMM0	 =
+						XMM1	 =
+						XMM4	 =
+						XMM3	 = XXYY[p0];
+						
+						TN.ps	 = _mm_set_ps1(N[p0]);
+						
+						p0	-= fixed;
+						
+						XMM0	 =
+						XMM4	 =
+						XMM3	 =
+						XMM1	 = _mm_sub_ps(XMM3, XXYY[p0]);
+						
+						TN1.ps	 = _mm_set_ps1(N[p0]);
+						
+						TN.ps	 = _mm_sub_ps(TN.ps, TN1.ps);
+						
+						bark_noise_hybridmp_SSE_SUBC2();
+						XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+						XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+						_mm_store_ps(noise+i  , XMM4);
+						i	+= 4;
+						PA		 = _mm_shuffle_ps(PA, PA, _MM_SHUFFLE(0,0,0,0));
+						PB		 = _mm_shuffle_ps(PB, PB, _MM_SHUFFLE(0,0,0,0));
+						PD		 = _mm_shuffle_ps(PD, PD, _MM_SHUFFLE(0,0,0,0));
+					}
+					break;
+				case 2:
+					{
+						__m128	XMM0, XMM1, XMM4, XMM3;
+						__m128x	TN;
+						__m128	XMM5;
+						int p0	 = (i  ) + fixed / 2;
+						
+						XMM5	 = _mm_lddqu_ps(N+p0);
+						XMM0	 = XXYY[p0  ];
+						XMM1	 =
+						XMM4	 =
+						XMM3	 = XXYY[p0+1];
+						TN.ps	 = _mm_shuffle_ps(XMM5, XMM5, _MM_SHUFFLE(1,1,1,0));
+						
+						p0	-= fixed;
+						
+						XMM5	 = _mm_lddqu_ps(N+p0);
+						XMM0	 = _mm_sub_ps(XMM0, XXYY[p0  ]);
+						XMM4	 =
+						XMM3	 =
+						XMM1	 = _mm_sub_ps(XMM3, XXYY[p0+1]);
+						XMM5	 = _mm_shuffle_ps(XMM5, XMM5, _MM_SHUFFLE(1,1,1,0));
+						
+						TN.ps	 = _mm_sub_ps(TN.ps, XMM5);
+						
+						bark_noise_hybridmp_SSE_SUBC2();
+						XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+						XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+						_mm_store_ps(noise+i  , XMM4);
+						i	+= 4;
+						PA		 = _mm_shuffle_ps(PA, PA, _MM_SHUFFLE(1,1,1,1));
+						PB		 = _mm_shuffle_ps(PB, PB, _MM_SHUFFLE(1,1,1,1));
+						PD		 = _mm_shuffle_ps(PD, PD, _MM_SHUFFLE(1,1,1,1));
+					}
+					break;
+				case 3:
+					{
+						__m128	XMM0, XMM1, XMM4, XMM3;
+						__m128x	TN;
+						__m128	XMM5;
+						int p0	 = (i  ) + fixed / 2;
+						
+						XMM5	 = _mm_lddqu_ps(N+p0);
+						XMM0	 = XXYY[p0  ];
+						XMM1	 = XXYY[p0+1];
+						XMM4	 =
+						XMM3	 = XXYY[p0+2];
+						TN.ps	 = _mm_shuffle_ps(XMM5, XMM5, _MM_SHUFFLE(2,2,1,0));
+						
+						p0	-=  fixed;
+						
+						XMM5	 = _mm_lddqu_ps(N+p0);
+						XMM0	 = _mm_sub_ps(XMM0, XXYY[p0  ]);
+						XMM1	 = _mm_sub_ps(XMM1, XXYY[p0+1]);
+						XMM4	 = 
+						XMM3	 = _mm_sub_ps(XMM3, XXYY[p0+2]);
+						XMM5	 = _mm_shuffle_ps(XMM5, XMM5, _MM_SHUFFLE(2,2,1,0));
+						
+						TN.ps	 = _mm_sub_ps(TN.ps, XMM5);
+						
+						bark_noise_hybridmp_SSE_SUBC2();
+						XMM4	 = _mm_sub_ps(XMM4, OFFSET);
+						XMM4	 = _mm_min_ps(XMM4, PM128(noise+i  ));
+						_mm_store_ps(noise+i  , XMM4);
+						i	+= 4;
+						PA		 = _mm_shuffle_ps(PA, PA, _MM_SHUFFLE(2,2,2,2));
+						PB		 = _mm_shuffle_ps(PB, PB, _MM_SHUFFLE(2,2,2,2));
+						PD		 = _mm_shuffle_ps(PD, PD, _MM_SHUFFLE(2,2,2,2));
+					}
+					break;
+			}
+		}
+	}
+	if(i<n)
+	{
+		__m128	XMM0	 = PA;
+		__m128	XMM1	 = PB;
+		XMM0	 = _mm_mul_ps(XMM0, PD);
+		XMM1	 = _mm_mul_ps(XMM1, PD);
+		XMM0	 = _mm_sub_ps(XMM0, OFFSET);
+		if(i%8!=0)
+		{
+			__m128	XMM4	 = _mm_load_ps(findex+i);
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM4	 = _mm_add_ps(XMM4, XMM0);
+			XMM4	 = _mm_min_ps(XMM4, PM128(noise+i   ));
+			_mm_store_ps(noise+i   , XMM4);
+			i	+= 4;
+		}
+		if(i%16!=0)
+		{
+			__m128	XMM4	 = _mm_load_ps(findex+i  );
+			__m128	XMM5	 = _mm_load_ps(findex+i+4);
+			__m128	XMM6	 = _mm_load_ps(noise+i   );
+			__m128	XMM7	 = _mm_load_ps(noise+i+ 4);
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM5	 = _mm_mul_ps(XMM5, XMM1);
+			XMM4	 = _mm_add_ps(XMM4, XMM0);
+			XMM5	 = _mm_add_ps(XMM5, XMM0);
+			XMM6	 = _mm_min_ps(XMM6, XMM4);
+			XMM7	 = _mm_min_ps(XMM7, XMM5);
+			_mm_store_ps(noise+i   , XMM6);
+			_mm_store_ps(noise+i+ 4, XMM7);
+			i	+= 8;
+		}
+		for(;i<n;i+=32)
+		{
+			__m128	XMM2, XMM3, XMM4, XMM5, XMM6, XMM7;
+			XMM4	 = _mm_load_ps(findex+i   );
+			XMM5	 = _mm_load_ps(findex+i+ 4);
+			XMM6	 = _mm_load_ps(noise+i    );
+			XMM7	 = _mm_load_ps(noise+i+  4);
+			XMM2	 = _mm_load_ps(findex+i+ 8);
+			XMM3	 = _mm_load_ps(findex+i+12);
+			XMM4	 = _mm_mul_ps(XMM4, XMM1);
+			XMM5	 = _mm_mul_ps(XMM5, XMM1);
+			XMM4	 = _mm_add_ps(XMM4, XMM0);
+			XMM5	 = _mm_add_ps(XMM5, XMM0);
+			XMM6	 = _mm_min_ps(XMM6, XMM4);
+			XMM7	 = _mm_min_ps(XMM7, XMM5);
+			XMM4	 = _mm_load_ps(noise+i+  8);
+			XMM5	 = _mm_load_ps(noise+i+ 12);
+			_mm_store_ps(noise+i   , XMM6);
+			_mm_store_ps(noise+i+ 4, XMM7);
+			XMM2	 = _mm_mul_ps(XMM2, XMM1);
+			XMM3	 = _mm_mul_ps(XMM3, XMM1);
+			XMM2	 = _mm_add_ps(XMM2, XMM0);
+			XMM3	 = _mm_add_ps(XMM3, XMM0);
+			XMM2	 = _mm_min_ps(XMM2, XMM4);
+			XMM3	 = _mm_min_ps(XMM3, XMM5);
+			_mm_store_ps(noise+i+ 8, XMM2);
+			_mm_store_ps(noise+i+12, XMM3);
+		}
+	}
+#else														/* SSE Optimize */
 static void bark_noise_hybridmp(int n,const long *b,
                                 const float *f,
                                 float *noise,
@@ -887,6 +3634,7 @@ static void bark_noise_hybridmp(int n,const long *b,
     R = (A + x * B) / D;
     if (R - offset < noise[i]) noise[i] = R - offset;
   }
+#endif														/* SSE Optimize */
 }
 
 /*  aoTuV M7
@@ -1031,8 +3779,42 @@ void _vp_noisemask(const vorbis_look_psy *p,
 
   int i,j,k,n=p->n;
   int partition=(p->vi->normal_p ? p->vi->normal_partition : 16);
+#ifdef __SSE__												/* SSE Optimize */
+	float *work		 = (float*)_ogg_alloca(n*sizeof(*work)*3);
+	float *bwork	 = (float*)_ogg_alloca(n*sizeof(float)*5);
+#else														/* SSE Optimize */
   float *work=alloca(n*sizeof(*work));
+#endif														/* SSE Optimize */
 
+#ifdef __SSE__												/* SSE Optimize */
+	bark_noise_hybridmp(p,logmdct,logmask,
+		      140.,-1, bwork, work+n);
+
+	for(i=0;i<n;i+=16)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3;
+		__m128	XMM4, XMM5, XMM6, XMM7;
+		XMM0	 = _mm_load_ps(logmdct+i   );
+		XMM4	 = _mm_load_ps(logmask+i   );
+		XMM1	 = _mm_load_ps(logmdct+i+ 4);
+		XMM5	 = _mm_load_ps(logmask+i+ 4);
+		XMM2	 = _mm_load_ps(logmdct+i+ 8);
+		XMM6	 = _mm_load_ps(logmask+i+ 8);
+		XMM3	 = _mm_load_ps(logmdct+i+12);
+		XMM7	 = _mm_load_ps(logmask+i+12);
+		XMM0	 = _mm_sub_ps(XMM0, XMM4);
+		XMM1	 = _mm_sub_ps(XMM1, XMM5);
+		XMM2	 = _mm_sub_ps(XMM2, XMM6);
+		XMM3	 = _mm_sub_ps(XMM3, XMM7);
+		_mm_store_ps(work+i   , XMM0);
+		_mm_store_ps(work+i+ 4, XMM1);
+		_mm_store_ps(work+i+ 8, XMM2);
+		_mm_store_ps(work+i+12, XMM3);
+	}
+
+	bark_noise_hybridmp(p,work,logmask,0.,
+		      p->vi->noisewindowfixed, bwork, work+n);
+#else														/* SSE Optimize */
   bark_noise_hybridmp(n,p->bark,logmdct,logmask,
                       140.,-1);
 
@@ -1040,8 +3822,33 @@ void _vp_noisemask(const vorbis_look_psy *p,
 
   bark_noise_hybridmp(n,p->bark,work,logmask,0.,
                       p->vi->noisewindowfixed);
+#endif														/* SSE Optimize */
 
+#ifdef __SSE__												/* SSE Optimize */
+	for(i=0;i<n;i+=16)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3;
+		__m128	XMM4, XMM5, XMM6, XMM7;
+		XMM0	 = _mm_load_ps(logmdct+i   );
+		XMM4	 = _mm_load_ps(work+i   );
+		XMM1	 = _mm_load_ps(logmdct+i+ 4);
+		XMM5	 = _mm_load_ps(work+i+ 4);
+		XMM2	 = _mm_load_ps(logmdct+i+ 8);
+		XMM6	 = _mm_load_ps(work+i+ 8);
+		XMM3	 = _mm_load_ps(logmdct+i+12);
+		XMM7	 = _mm_load_ps(work+i+12);
+		XMM0	 = _mm_sub_ps(XMM0, XMM4);
+		XMM1	 = _mm_sub_ps(XMM1, XMM5);
+		XMM2	 = _mm_sub_ps(XMM2, XMM6);
+		XMM3	 = _mm_sub_ps(XMM3, XMM7);
+		_mm_store_ps(work+i   , XMM0);
+		_mm_store_ps(work+i+ 4, XMM1);
+		_mm_store_ps(work+i+ 8, XMM2);
+		_mm_store_ps(work+i+12, XMM3);
+	}
+#else														/* SSE Optimize */
   for(i=0;i<n;i++)work[i]=logmdct[i]-work[i];
+#endif														/* SSE Optimize */
 
 #if 0
   {
@@ -1080,6 +3887,122 @@ void _vp_noisemask(const vorbis_look_psy *p,
        ((p->vi->noisecompand[dB]-p->vi->noisecompand_high[dB])*noise_compand_level);
     }
   }
+#ifdef __SSE__												/* SSE Optimize */
+	{
+		static _MM_ALIGN16 const float NCLMAX[4]	 = {
+			NOISE_COMPAND_LEVELS-1, NOISE_COMPAND_LEVELS-1,
+			NOISE_COMPAND_LEVELS-1, NOISE_COMPAND_LEVELS-1
+		};
+		int spm4 = (i+15)&(~15);
+		for(;i<spm4;i++){
+			int dB=logmask[i]+.5;
+			if(dB>=NOISE_COMPAND_LEVELS) dB=NOISE_COMPAND_LEVELS-1;
+			if(dB<0) dB=0;
+			epeak[i] = work[i]+stn_compand[dB];
+		    logmask[i] = work[i]+p->vi->noisecompand[dB];
+		}
+		{
+			register float* fwork2	 = (float*)(work+n);
+			register float* fwork3	 = (float*)(work+2*n);
+			for(i=spm4;i<n;i+=16)
+			{
+#if	!defined(__SSE2__)
+				__m64	MM0, MM1, MM2, MM3, MM4, MM5, MM6, MM7;
+#endif
+				__m128	XMM0, XMM1, XMM2, XMM3;
+				XMM0	 = _mm_load_ps(logmask+i   );
+				XMM1	 = _mm_load_ps(logmask+i+ 4);
+				XMM2	 = _mm_load_ps(logmask+i+ 8);
+				XMM3	 = _mm_load_ps(logmask+i+12);
+				XMM0	 = _mm_min_ps(XMM0, PM128(NCLMAX));
+				XMM1	 = _mm_min_ps(XMM1, PM128(NCLMAX));
+				XMM2	 = _mm_min_ps(XMM2, PM128(NCLMAX));
+				XMM3	 = _mm_min_ps(XMM3, PM128(NCLMAX));
+				XMM0	 = _mm_max_ps(XMM0, PM128(PFV_0));
+				XMM1	 = _mm_max_ps(XMM1, PM128(PFV_0));
+				XMM2	 = _mm_max_ps(XMM2, PM128(PFV_0));
+				XMM3	 = _mm_max_ps(XMM3, PM128(PFV_0));
+#if	defined(__SSE2__)
+				_mm_store_si128((__m128i*)(fwork2+i   ), _mm_cvtps_epi32(XMM0));
+				_mm_store_si128((__m128i*)(fwork2+i+ 4), _mm_cvtps_epi32(XMM1));
+				_mm_store_si128((__m128i*)(fwork2+i+ 8), _mm_cvtps_epi32(XMM2));
+				_mm_store_si128((__m128i*)(fwork2+i+12), _mm_cvtps_epi32(XMM3));
+			}
+#else
+				MM0		 = _mm_cvtps_pi32(XMM0);
+				MM2		 = _mm_cvtps_pi32(XMM1);
+				MM4		 = _mm_cvtps_pi32(XMM2);
+				MM6 	 = _mm_cvtps_pi32(XMM3);
+				XMM0	 = _mm_movehl_ps(XMM0, XMM0);
+				XMM1	 = _mm_movehl_ps(XMM1, XMM1);
+				XMM2	 = _mm_movehl_ps(XMM2, XMM2);
+				XMM3	 = _mm_movehl_ps(XMM3, XMM3);
+				MM1		 = _mm_cvtps_pi32(XMM0);
+				MM3		 = _mm_cvtps_pi32(XMM1);
+				MM5		 = _mm_cvtps_pi32(XMM2);
+				MM7		 = _mm_cvtps_pi32(XMM3);
+				PM64(fwork2+i   )	 = MM0;
+				PM64(fwork2+i+ 4)	 = MM2;
+				PM64(fwork2+i+ 8)	 = MM4;
+				PM64(fwork2+i+ 2)	 = MM1;
+				PM64(fwork2+i+12)	 = MM6;
+				PM64(fwork2+i+ 6)	 = MM3;
+				PM64(fwork2+i+10)	 = MM5;
+				PM64(fwork2+i+14)	 = MM7;
+			}
+			_mm_empty();
+#endif
+			for(i=spm4;i<n;i+=4)
+			{
+				fwork3[i  ]	 = stn_compand[*((int*)(fwork2+i  ))];
+				fwork3[i+1]	 = stn_compand[*((int*)(fwork2+i+1))];
+				fwork3[i+2]	 = stn_compand[*((int*)(fwork2+i+2))];
+				fwork3[i+3]	 = stn_compand[*((int*)(fwork2+i+3))];
+			}
+			for(i=spm4;i<n;i+=4)
+			{
+				fwork2[i  ]	 = p->vi->noisecompand[*((int*)(fwork2+i  ))];
+				fwork2[i+1]	 = p->vi->noisecompand[*((int*)(fwork2+i+1))];
+				fwork2[i+2]	 = p->vi->noisecompand[*((int*)(fwork2+i+2))];
+				fwork2[i+3]	 = p->vi->noisecompand[*((int*)(fwork2+i+3))];
+			}
+			//epeak[i] = work[i]+stn_compand[dB];
+		    //logmask[i] = work[i]+p->vi->noisecompand[dB];
+			for(i=spm4;i<n;i+=16)
+			{
+				__m128	XMM0	 = _mm_load_ps(fwork2+i   );
+				__m128	XMM4	 = _mm_load_ps(work+i   );
+				__m128	XMM1	 = _mm_load_ps(fwork2+i+ 4);
+				__m128	XMM5	 = _mm_load_ps(work+i+ 4);
+				__m128	XMM2	 = _mm_load_ps(fwork2+i+ 8);
+				__m128	XMM6	 = _mm_load_ps(work+i+ 8);
+				__m128	XMM3	 = _mm_load_ps(fwork2+i+12);
+				__m128	XMM7	 = _mm_load_ps(work+i+12);
+				XMM0	 = _mm_add_ps(XMM0, XMM4);
+				XMM1	 = _mm_add_ps(XMM1, XMM5);
+				XMM2	 = _mm_add_ps(XMM2, XMM6);
+				XMM3	 = _mm_add_ps(XMM3, XMM7);
+				_mm_store_ps(logmask+i   , XMM0);
+				_mm_store_ps(logmask+i+ 4, XMM1);
+				_mm_store_ps(logmask+i+ 8, XMM2);
+				_mm_store_ps(logmask+i+12, XMM3);
+
+				XMM0	 = _mm_load_ps(fwork3+i   );
+				XMM1	 = _mm_load_ps(fwork3+i+ 4);
+				XMM2	 = _mm_load_ps(fwork3+i+ 8);
+				XMM3	 = _mm_load_ps(fwork3+i+12);
+				XMM0	 = _mm_add_ps(XMM0, XMM4);
+				XMM1	 = _mm_add_ps(XMM1, XMM5);
+				XMM2	 = _mm_add_ps(XMM2, XMM6);
+				XMM3	 = _mm_add_ps(XMM3, XMM7);
+				_mm_store_ps(epeak+i   , XMM0);
+				_mm_store_ps(epeak+i+ 4, XMM1);
+				_mm_store_ps(epeak+i+ 8, XMM2);
+				_mm_store_ps(epeak+i+12, XMM3);
+			}
+		}
+	}
+#else														/* SSE Optimize */
   for(;i<n;i++){
     int dB=logmask[i]+.5;
     if(dB>=NOISE_COMPAND_LEVELS)dB=NOISE_COMPAND_LEVELS-1;
@@ -1087,6 +4010,7 @@ void _vp_noisemask(const vorbis_look_psy *p,
     epeak[i]= work[i]+stn_compand[dB];
     logmask[i]= work[i]+p->vi->noisecompand[dB];
   }
+#endif														/* SSE Optimize */
 
   /* initialization of npeak(nepeak) */
   for(i=0,k=0; i<n; i+=partition, k++)npeak[k]=0.f;
@@ -1157,6 +4081,48 @@ void _vp_tonemask(const vorbis_look_psy *p,
 
   int i,n=p->n;
 
+#ifdef __SSE__												/* SSE Optimize */
+	int seedsize = (p->total_octave_lines+31)&(~31);
+	float *seed = (float*)_ogg_alloca(sizeof(*seed)*seedsize);
+	float att=local_specmax+p->vi->ath_adjatt;
+	{
+		__m128	XMM0	 = PM128(PNEGINF);
+		for(i=0;i<seedsize;i+=32)
+		{
+			_mm_store_ps(seed+i   , XMM0);
+			_mm_store_ps(seed+i+ 4, XMM0);
+			_mm_store_ps(seed+i+ 8, XMM0);
+			_mm_store_ps(seed+i+12, XMM0);
+			_mm_store_ps(seed+i+16, XMM0);
+			_mm_store_ps(seed+i+20, XMM0);
+			_mm_store_ps(seed+i+24, XMM0);
+			_mm_store_ps(seed+i+28, XMM0);
+		}
+	}
+	/* set the ATH (floating below localmax, not global max by a
+	   specified att) */
+	if(att<p->vi->ath_maxatt)att=p->vi->ath_maxatt;
+	
+	{
+		__m128	pm = _mm_set_ps1(att);
+		for(i=0;i<n;i+=16)
+		{
+			__m128	XMM0, XMM1, XMM2, XMM3;
+			XMM0	 = _mm_load_ps(p->ath+i   );
+			XMM1	 = _mm_load_ps(p->ath+i+ 4);
+			XMM2	 = _mm_load_ps(p->ath+i+ 8);
+			XMM3	 = _mm_load_ps(p->ath+i+12);
+			XMM0	 = _mm_add_ps(XMM0, pm);
+			XMM1	 = _mm_add_ps(XMM1, pm);
+			XMM2	 = _mm_add_ps(XMM2, pm);
+			XMM3	 = _mm_add_ps(XMM3, pm);
+			_mm_store_ps(logmask+i   , XMM0);
+			_mm_store_ps(logmask+i+ 4, XMM1);
+			_mm_store_ps(logmask+i+ 8, XMM2);
+			_mm_store_ps(logmask+i+12, XMM3);
+		}
+	}
+#else														/* SSE Optimize */
   float *seed=alloca(sizeof(*seed)*p->total_octave_lines);
   float att=local_specmax+p->vi->ath_adjatt;
   for(i=0;i<p->total_octave_lines;i++)seed[i]=NEGINF;
@@ -1167,6 +4133,7 @@ void _vp_tonemask(const vorbis_look_psy *p,
 
   for(i=0;i<n;i++)
     logmask[i]=p->ath[i]+att;
+#endif														/* SSE Optimize */
 
   /* tone masking */
   seed_loop(p,(const float ***)p->tonecurves,logfft,logmask,seed,global_specmax);

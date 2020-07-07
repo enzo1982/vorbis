@@ -1,6 +1,7 @@
+LIBRARY libvorbisfile-3.dll
+;
 ; vorbisfile.def
 ;
-LIBRARY
 EXPORTS
 ov_clear
 ov_open

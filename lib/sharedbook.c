@@ -27,11 +27,17 @@
 
 /**** pack/unpack helpers ******************************************/
 
+#if	defined(__INTEL_COMPILER)
+int ov_ilog(ogg_uint32_t v){
+	return(_bit_scan_reverse(v) + 1);
+}
+#else
 int ov_ilog(ogg_uint32_t v){
   int ret;
   for(ret=0;v;ret++)v>>=1;
   return ret;
 }
+#endif
 
 /* 32 bit float (not IEEE; nonnormalized mantissa +
    biased exponent) : neeeeeee eeemmmmm mmmmmmmm mmmmmmmm

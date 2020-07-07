@@ -26,6 +26,10 @@
 #include "registry.h"
 #include "psy.h"
 #include "misc.h"
+#ifdef __SSE__												/* SSE Optimize */
+#include <float.h>
+#include "xmmlib.h"
+#endif														/* SSE Optimize */
 
 /* simplistic, wasteful way of doing this (unique lookup for each
    mode/submapping); there should be a central repository for
@@ -227,6 +231,510 @@ static float FLOOR1_fromdB_LOOKUP[256]={
 #endif
 
 
+#ifdef __SSE__												/* SSE Optimize */
+static void mapping_forward_sub0(float *pcm, float *logfft, float scale_dB,
+								 float *local_ampmax, int i, int n)
+{
+	_MM_ALIGN16 const float mparm[4] = {
+		7.17711438e-7f/2.f, 7.17711438e-7f/2.f, 7.17711438e-7f/2.f, 7.17711438e-7f/2.f,
+	};
+	__m128	SCALEdB;
+	__m128	LAM0;
+#if	!defined(__SSE2__)
+	__m128	LAM1;
+#endif
+	int	j, k;
+	SCALEdB	 = _mm_set_ps1(scale_dB+.345f-764.6161886f/2.f);
+	LAM0	 = _mm_set_ps1(local_ampmax[i]);
+#if	defined(__SSE2__)
+	if(n>=256&&n<=4096)
+	{
+		/*
+			Cation! This routhine is for SSE optimized fft only.
+		*/
+		float	rfv	 = logfft[0];
+		logfft[0]	 = 0.f;
+		logfft[1]	 = 0.f;
+#if	defined(__SSE3__)
+		/*
+			SSE3 optimized code
+		*/
+		for(j=0,k=0;j<n;j+=16,k+=8)
+		{
+			__m128	XMM0, XMM2;
+			__m128	XMM1, XMM3;
+			XMM0	 = _mm_load_ps(pcm+j   );
+			XMM1	 = _mm_load_ps(pcm+j+ 4);
+			XMM2	 = _mm_load_ps(pcm+j+ 8);
+			XMM3	 = _mm_load_ps(pcm+j+12);
+			XMM0	 = _mm_mul_ps(XMM0, XMM0);
+			XMM1	 = _mm_mul_ps(XMM1, XMM1);
+			XMM2	 = _mm_mul_ps(XMM2, XMM2);
+			XMM3	 = _mm_mul_ps(XMM3, XMM3);
+			XMM0	 = _mm_hadd_ps(XMM0, XMM1);
+			XMM2	 = _mm_hadd_ps(XMM2, XMM3);
+			XMM0	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM0));
+			XMM2	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM2));
+			XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+			XMM2	 = _mm_mul_ps(XMM2, PM128(mparm));
+			XMM0	 = _mm_add_ps(XMM0, SCALEdB);
+			XMM2	 = _mm_add_ps(XMM2, SCALEdB);
+			_mm_store_ps(logfft+k   , XMM0);
+			_mm_store_ps(logfft+k+ 4, XMM2);
+			XMM0		 = _mm_max_ps(XMM0, XMM2);
+			LAM0		 = _mm_max_ps(LAM0, XMM0);
+		}
+#else	/* for SSE2 */
+		/*
+			SSE2 optimized code
+		*/
+		for(j=0,k=0;j<n;j+=16,k+=8)
+		{
+			__m128	XMM0, XMM2;
+			__m128	XMM1, XMM3;
+			__m128	XMM4, XMM5;
+			XMM0	 = _mm_load_ps(pcm+j   );
+			XMM2	 = _mm_load_ps(pcm+j+ 8);
+			XMM4	 = _mm_load_ps(pcm+j+ 4);
+			XMM5	 = _mm_load_ps(pcm+j+12);
+			XMM1	 = XMM0;
+			XMM3	 = XMM2;
+			XMM0	 = _mm_shuffle_ps(XMM0, XMM4,_MM_SHUFFLE(2,0,2,0));
+			XMM1	 = _mm_shuffle_ps(XMM1, XMM4,_MM_SHUFFLE(3,1,3,1));
+			XMM2	 = _mm_shuffle_ps(XMM2, XMM5,_MM_SHUFFLE(2,0,2,0));
+			XMM3	 = _mm_shuffle_ps(XMM3, XMM5,_MM_SHUFFLE(3,1,3,1));
+			XMM0	 = _mm_mul_ps(XMM0, XMM0);
+			XMM1	 = _mm_mul_ps(XMM1, XMM1);
+			XMM2	 = _mm_mul_ps(XMM2, XMM2);
+			XMM3	 = _mm_mul_ps(XMM3, XMM3);
+			XMM0	 = _mm_add_ps(XMM0, XMM1);
+			XMM2	 = _mm_add_ps(XMM2, XMM3);
+			XMM0	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM0));
+			XMM2	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM2));
+			XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+			XMM2	 = _mm_mul_ps(XMM2, PM128(mparm));
+			XMM0	 = _mm_add_ps(XMM0, SCALEdB);
+			XMM2	 = _mm_add_ps(XMM2, SCALEdB);
+			_mm_store_ps(logfft+k   , XMM0);
+			_mm_store_ps(logfft+k+ 4, XMM2);
+			XMM0		 = _mm_max_ps(XMM0, XMM2);
+			LAM0		 = _mm_max_ps(LAM0, XMM0);
+		}
+#endif
+		local_ampmax[i]	 =  _mm_max_horz(LAM0);
+		logfft[0]	 = rfv;
+	}
+	else
+	{
+		/*
+			SSE2 optimized code
+		*/
+		int Cnt	 = ((n-2)&(~15))+1;
+		for(j=1;j<Cnt;j+=16){
+		__m128	XMM0, XMM3;
+#if	defined(__SSE3__)
+			{
+				__m128	XMM2, XMM5;
+				XMM0	 = _mm_lddqu_ps(pcm+j   );
+				XMM2	 = _mm_lddqu_ps(pcm+j+ 4);
+				XMM3	 = _mm_lddqu_ps(pcm+j+ 8);
+				XMM5	 = _mm_lddqu_ps(pcm+j+12);
+				XMM0	 = _mm_mul_ps(XMM0, XMM0);
+				XMM2	 = _mm_mul_ps(XMM2, XMM2);
+				XMM3	 = _mm_mul_ps(XMM3, XMM3);
+				XMM5	 = _mm_mul_ps(XMM5, XMM5);
+				XMM0	 = _mm_hadd_ps(XMM0, XMM2);
+				XMM3	 = _mm_hadd_ps(XMM3, XMM5);
+			}
+#else
+			{
+				__m128	XMM2, XMM5;
+				{
+					__m128	XMM1, XMM4;
+					XMM0	 = _mm_loadu_ps(pcm+j   );
+					XMM1	 = _mm_loadu_ps(pcm+j+ 4);
+					XMM3	 = _mm_loadu_ps(pcm+j+ 8);
+					XMM4	 = _mm_loadu_ps(pcm+j+12);
+					XMM2	 = XMM0;
+					XMM5	 = XMM3;
+					XMM0	 = _mm_shuffle_ps(XMM0, XMM1,_MM_SHUFFLE(2,0,2,0));
+					XMM2	 = _mm_shuffle_ps(XMM2, XMM1,_MM_SHUFFLE(3,1,3,1));
+					XMM3	 = _mm_shuffle_ps(XMM3, XMM4,_MM_SHUFFLE(2,0,2,0));
+					XMM5	 = _mm_shuffle_ps(XMM5, XMM4,_MM_SHUFFLE(3,1,3,1));
+				}
+				XMM0	 = _mm_mul_ps(XMM0, XMM0);
+				XMM3	 = _mm_mul_ps(XMM3, XMM3);
+				XMM2	 = _mm_mul_ps(XMM2, XMM2);
+				XMM5	 = _mm_mul_ps(XMM5, XMM5);
+				XMM0	 = _mm_add_ps(XMM0, XMM2);
+				XMM3	 = _mm_add_ps(XMM3, XMM5);
+			}
+#endif
+			XMM0	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM0));
+			XMM3	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM3));
+			XMM0	 = _mm_mul_ps(XMM0, PM128(mparm  ));
+			XMM3	 = _mm_mul_ps(XMM3, PM128(mparm+4));
+			XMM0	 = _mm_add_ps(XMM0, SCALEdB);
+			XMM3	 = _mm_add_ps(XMM3, SCALEdB);
+			_mm_storeu_ps(logfft+((j+1)>>1), XMM0);
+			_mm_storeu_ps(logfft+((j+9)>>1), XMM3);
+			XMM0		 = _mm_max_ps(XMM0, XMM3);
+			LAM0		 = _mm_max_ps(LAM0, XMM0);
+		}
+		Cnt	 = ((n-2)&(~7))+1;
+		for(;j<Cnt;j+=8){
+			__m128	XMM0;
+#if	defined(__SSE3__)
+			{
+				__m128	XMM1;
+				XMM0	 = _mm_lddqu_ps(pcm+j   );
+				XMM1	 = _mm_lddqu_ps(pcm+j+ 4);
+				XMM0	 = _mm_mul_ps(XMM0, XMM0);
+				XMM1	 = _mm_mul_ps(XMM1, XMM1);
+				XMM0	 = _mm_hadd_ps(XMM0, XMM1);
+			}
+#else
+			{
+				__m128	XMM2;
+				{
+					__m128	XMM1;
+					XMM0	 = _mm_loadu_ps(pcm+j   );
+					XMM1	 = _mm_loadu_ps(pcm+j+ 4);
+					XMM2	 = XMM0;
+					XMM0	 = _mm_shuffle_ps(XMM0, XMM1,_MM_SHUFFLE(2,0,2,0));
+					XMM2	 = _mm_shuffle_ps(XMM2, XMM1,_MM_SHUFFLE(3,1,3,1));
+				}
+				XMM0	 = _mm_mul_ps(XMM0, XMM0);
+				XMM2	 = _mm_mul_ps(XMM2, XMM2);
+				XMM0	 = _mm_add_ps(XMM0, XMM2);
+			}
+#endif
+			XMM0	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM0));
+			XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+			XMM0	 = _mm_add_ps(XMM0, SCALEdB);
+			_mm_storeu_ps(&logfft[(j+1)>>1], XMM0);
+			LAM0		 = _mm_max_ps(LAM0, XMM0);
+		}
+		local_ampmax[i]	 = _mm_max_horz(LAM0);
+		for(;j<n;j+=2){
+			float	temp	 = pcm[j]*pcm[j]+pcm[j+1]*pcm[j+1];
+			temp=logfft[(j+1)>>1]=scale_dB+.5f*todB(&temp)  + .345; /* +
+										.345 is a hack; the original todB
+										estimation used on IEEE 754
+										compliant machines had a bug that
+										returned dB values about a third
+										of a decibel too high.  The bug
+										was harmless because tunings
+										implicitly took that into
+										account.  However, fixing the bug
+										in the estimator requires
+										changing all the tunings as well.
+										For now, it's easier to sync
+										things back up here, and
+										recalibrate the tunings in the
+										next major model upgrade. */
+			if(temp>local_ampmax[i])
+				local_ampmax[i]	 = temp;
+		}
+	}
+#else	/* for __SSE2__ */
+	/*
+		SSE optimized code
+	*/
+	LAM1	 = LAM0;
+	if(n>=256&&n<=4096)
+	{
+		/*
+			Cation! This routhine is for SSE optimized fft only.
+		*/
+		float	rfv	 = logfft[0];
+		logfft[0]	 = 0.f;
+		logfft[1]	 = 0.f;
+		for(j=0,k=0;j<n;j+=32,k+=16)
+		{
+			__m64	MM0, MM1, MM2, MM3;
+			__m64	MM4, MM5, MM6, MM7;
+			__m128x	U0, U1, U2, U3;
+			{
+				__m128	XMM0, XMM1, XMM2, XMM3;
+				__m128	XMM4, XMM5;
+				XMM0	 = _mm_load_ps(pcm+j   );
+				XMM2	 = _mm_load_ps(pcm+j+ 8);
+				XMM4	 = _mm_load_ps(pcm+j+ 4);
+				XMM5	 = _mm_load_ps(pcm+j+12);
+				XMM1	 = XMM0;
+				XMM3	 = XMM2;
+				XMM0	 = _mm_shuffle_ps(XMM0, XMM4,_MM_SHUFFLE(2,0,2,0));
+				XMM1	 = _mm_shuffle_ps(XMM1, XMM4,_MM_SHUFFLE(3,1,3,1));
+				XMM2	 = _mm_shuffle_ps(XMM2, XMM5,_MM_SHUFFLE(2,0,2,0));
+				XMM3	 = _mm_shuffle_ps(XMM3, XMM5,_MM_SHUFFLE(3,1,3,1));
+				XMM0	 = _mm_mul_ps(XMM0, XMM0);
+				XMM1	 = _mm_mul_ps(XMM1, XMM1);
+				XMM2	 = _mm_mul_ps(XMM2, XMM2);
+				XMM3	 = _mm_mul_ps(XMM3, XMM3);
+				XMM0	 = _mm_add_ps(XMM0, XMM1);
+				XMM2	 = _mm_add_ps(XMM2, XMM3);
+				XMM4	 = _mm_load_ps(pcm+j+16);
+				U0.ps	 = XMM0;
+				U1.ps	 = XMM2;
+				XMM1	 = _mm_load_ps(pcm+j+24);
+				XMM0	 = _mm_load_ps(pcm+j+20);
+				XMM2	 = _mm_load_ps(pcm+j+28);
+				XMM5	 = XMM4;
+				XMM3	 = XMM1;
+				XMM4	 = _mm_shuffle_ps(XMM4, XMM0,_MM_SHUFFLE(2,0,2,0));
+				XMM5	 = _mm_shuffle_ps(XMM5, XMM0,_MM_SHUFFLE(3,1,3,1));
+				XMM1	 = _mm_shuffle_ps(XMM1, XMM2,_MM_SHUFFLE(2,0,2,0));
+				XMM3	 = _mm_shuffle_ps(XMM3, XMM2,_MM_SHUFFLE(3,1,3,1));
+				MM0		 = U0.pi64[1];
+				MM1		 = U1.pi64[1];
+				MM2		 = U0.pi64[0];
+				MM3		 = U1.pi64[0];
+				XMM4	 = _mm_mul_ps(XMM4, XMM4);
+				XMM5	 = _mm_mul_ps(XMM5, XMM5);
+				XMM1	 = _mm_mul_ps(XMM1, XMM1);
+				XMM3	 = _mm_mul_ps(XMM3, XMM3);
+				XMM4	 = _mm_add_ps(XMM4, XMM5);
+				XMM1	 = _mm_add_ps(XMM1, XMM3);
+				XMM0	 = _mm_cvtpi32_ps(XMM0, MM0);
+				XMM2	 = _mm_cvtpi32_ps(XMM2, MM1);
+				U2.ps	 = XMM4;
+				U3.ps	 = XMM1;
+				MM4		 = U2.pi64[1];
+				MM5		 = U3.pi64[1];
+				MM6		 = U2.pi64[0];
+				MM7		 = U3.pi64[0];
+				XMM5	 = _mm_cvtpi32_ps(XMM5, MM4);
+				XMM3	 = _mm_cvtpi32_ps(XMM3, MM5);
+				XMM0	 = _mm_movelh_ps(XMM0, XMM0);
+				XMM2	 = _mm_movelh_ps(XMM2, XMM2);
+				XMM5	 = _mm_movelh_ps(XMM5, XMM5);
+				XMM3	 = _mm_movelh_ps(XMM3, XMM3);
+				XMM0	 = _mm_cvtpi32_ps(XMM0, MM2);
+				XMM2	 = _mm_cvtpi32_ps(XMM2, MM3);
+				XMM5	 = _mm_cvtpi32_ps(XMM5, MM6);
+				XMM3	 = _mm_cvtpi32_ps(XMM3, MM7);
+				XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+				XMM2	 = _mm_mul_ps(XMM2, PM128(mparm));
+				XMM5	 = _mm_mul_ps(XMM5, PM128(mparm));
+				XMM3	 = _mm_mul_ps(XMM3, PM128(mparm));
+				XMM0	 = _mm_add_ps(XMM0, SCALEdB);
+				XMM2	 = _mm_add_ps(XMM2, SCALEdB);
+				XMM5	 = _mm_add_ps(XMM5, SCALEdB);
+				XMM3	 = _mm_add_ps(XMM3, SCALEdB);
+				_mm_store_ps(logfft+k   , XMM0);
+				_mm_store_ps(logfft+k+ 4, XMM2);
+				_mm_store_ps(logfft+k+ 8, XMM5);
+				_mm_store_ps(logfft+k+12, XMM3);
+				XMM0		 = _mm_max_ps(XMM0, XMM2);
+				XMM5		 = _mm_max_ps(XMM5, XMM3);
+				LAM0		 = _mm_max_ps(LAM0, XMM0);
+				LAM1		 = _mm_max_ps(LAM1, XMM5);
+			}
+		}
+		_mm_empty();
+		logfft[0]	 = rfv;
+		LAM0		 = _mm_max_ps(LAM0, LAM1);
+		local_ampmax[i]	 = _mm_max_horz(LAM0);
+	}
+	else
+	{
+		__m64	MM0, MM1, MM2, MM3;
+		__m128x	U0, U1;
+		int Cnt	 = ((n-2)&(~15))+1;
+		for(j=1;j<Cnt;j+=16){
+			__m128	XMM0, XMM3;
+			{
+				__m128	XMM2, XMM5;
+				{
+					__m128	XMM1, XMM4;
+					XMM0	 = _mm_loadu_ps(pcm+j   );
+					XMM1	 = _mm_loadu_ps(pcm+j+ 4);
+					XMM3	 = _mm_loadu_ps(pcm+j+ 8);
+					XMM4	 = _mm_loadu_ps(pcm+j+12);
+					XMM2	 = XMM0;
+					XMM5	 = XMM3;
+					XMM0	 = _mm_shuffle_ps(XMM0, XMM1,_MM_SHUFFLE(2,0,2,0));
+					XMM2	 = _mm_shuffle_ps(XMM2, XMM1,_MM_SHUFFLE(3,1,3,1));
+					XMM3	 = _mm_shuffle_ps(XMM3, XMM4,_MM_SHUFFLE(2,0,2,0));
+					XMM5	 = _mm_shuffle_ps(XMM5, XMM4,_MM_SHUFFLE(3,1,3,1));
+				}
+				XMM0	 = _mm_mul_ps(XMM0, XMM0);
+				XMM3	 = _mm_mul_ps(XMM3, XMM3);
+				XMM2	 = _mm_mul_ps(XMM2, XMM2);
+				XMM5	 = _mm_mul_ps(XMM5, XMM5);
+				XMM0	 = _mm_add_ps(XMM0, XMM2);
+				XMM3	 = _mm_add_ps(XMM3, XMM5);
+			}
+			U0.ps	 = XMM0;
+			U1.ps	 = XMM3;
+			MM0		 = U0.pi64[1];
+			MM1		 = U1.pi64[1];
+			MM2		 = U0.pi64[0];
+			MM3		 = U1.pi64[0];
+			XMM0	 = _mm_cvtpi32_ps(XMM0, MM0);
+			XMM3	 = _mm_cvtpi32_ps(XMM3, MM1);
+			XMM0	 = _mm_movelh_ps(XMM0, XMM0);
+			XMM3	 = _mm_movelh_ps(XMM3, XMM3);
+			XMM0	 = _mm_cvtpi32_ps(XMM0, MM2);
+			XMM3	 = _mm_cvtpi32_ps(XMM3, MM3);
+			XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+			XMM3	 = _mm_mul_ps(XMM3, PM128(mparm));
+			XMM0	 = _mm_add_ps(XMM0, SCALEdB);
+			XMM3	 = _mm_add_ps(XMM3, SCALEdB);
+			_mm_storeu_ps(logfft+((j+1)>>1), XMM0);
+			_mm_storeu_ps(logfft+((j+9)>>1), XMM3);
+			LAM0		 = _mm_max_ps(LAM0, XMM0);
+			LAM1		 = _mm_max_ps(LAM1, XMM3);
+		}
+		Cnt	 = ((n-2)&(~7))+1;
+		for(;j<Cnt;j+=8){
+			__m128	XMM0;
+			{
+				__m128	XMM2;
+				{
+					__m128	XMM1;
+					XMM0	 = _mm_loadu_ps(pcm+j   );
+					XMM1	 = _mm_loadu_ps(pcm+j+ 4);
+					XMM2	 = XMM0;
+					XMM0	 = _mm_shuffle_ps(XMM0, XMM1,_MM_SHUFFLE(2,0,2,0));
+					XMM2	 = _mm_shuffle_ps(XMM2, XMM1,_MM_SHUFFLE(3,1,3,1));
+				}
+				XMM0	 = _mm_mul_ps(XMM0, XMM0);
+				XMM2	 = _mm_mul_ps(XMM2, XMM2);
+				XMM0	 = _mm_add_ps(XMM0, XMM2);
+			}
+			U0.ps	 = XMM0;
+			MM0		 = U0.pi64[1];
+			MM1		 = U0.pi64[0];
+			XMM0	 = _mm_cvtpi32_ps(XMM0, MM0);
+			XMM0	 = _mm_movelh_ps(XMM0, XMM0);
+			XMM0	 = _mm_cvtpi32_ps(XMM0, MM1);
+			XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+			XMM0	 = _mm_add_ps(XMM0, SCALEdB);
+			_mm_storeu_ps(logfft+((j+1)>>1), XMM0);
+			LAM0		 = _mm_max_ps(LAM0, XMM0);
+		}
+		LAM0		 = _mm_max_ps(LAM0, LAM1);
+		_mm_empty();
+		local_ampmax[i]	 = _mm_max_horz(LAM0);
+		for(;j<n;j+=2){
+			float	temp	 = pcm[j]*pcm[j]+pcm[j+1]*pcm[j+1];
+			temp=logfft[(j+1)>>1]=scale_dB+.5f*todB(&temp)  + .345; /* +
+										.345 is a hack; the original todB
+										estimation used on IEEE 754
+										compliant machines had a bug that
+										returned dB values about a third
+										of a decibel too high.  The bug
+										was harmless because tunings
+										implicitly took that into
+										account.  However, fixing the bug
+										in the estimator requires
+										changing all the tunings as well.
+										For now, it's easier to sync
+										things back up here, and
+										recalibrate the tunings in the
+										next major model upgrade. */
+			if(temp>local_ampmax[i])
+				local_ampmax[i]	 = temp;
+		}
+	}
+#endif
+}
+
+static void mapping_forward_sub1(float *mdct, float *logmdct, int n)
+{
+	static _MM_ALIGN16 const float mparm[4]	 = {
+		7.17711438e-7f, 7.17711438e-7f, 7.17711438e-7f, 7.17711438e-7f
+	};
+	static _MM_ALIGN16 const float PFV0[4]	 = {
+		0.345f-764.6161886f,	0.345f-764.6161886f,
+		0.345f-764.6161886f,	0.345f-764.6161886f
+	};
+	int j;
+#if	defined(__SSE2__)
+	/*
+		SSE2 optimized code
+	*/
+	for(j=0;j<n/2;j+=16)
+	{
+		__m128	XMM0, XMM1, XMM2, XMM3;
+		XMM0	 = _mm_load_ps(mdct+j   );
+		XMM1	 = _mm_load_ps(mdct+j+ 4);
+		XMM2	 = _mm_load_ps(mdct+j+ 8);
+		XMM3	 = _mm_load_ps(mdct+j+12);
+		XMM0	 = _mm_and_ps(XMM0, PM128(PABSMASK));
+		XMM1	 = _mm_and_ps(XMM1, PM128(PABSMASK));
+		XMM2	 = _mm_and_ps(XMM2, PM128(PABSMASK));
+		XMM3	 = _mm_and_ps(XMM3, PM128(PABSMASK));
+		XMM0	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM0));
+		XMM1	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM1));
+		XMM2	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM2));
+		XMM3	 = _mm_cvtepi32_ps(_mm_castps_si128(XMM3));
+		XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+		XMM1	 = _mm_mul_ps(XMM1, PM128(mparm));
+		XMM2	 = _mm_mul_ps(XMM2, PM128(mparm));
+		XMM3	 = _mm_mul_ps(XMM3, PM128(mparm));
+		XMM0	 = _mm_add_ps(XMM0, PM128(PFV0));
+		XMM1	 = _mm_add_ps(XMM1, PM128(PFV0));
+		XMM2	 = _mm_add_ps(XMM2, PM128(PFV0));
+		XMM3	 = _mm_add_ps(XMM3, PM128(PFV0));
+		_mm_store_ps(logmdct+j   , XMM0);
+		_mm_store_ps(logmdct+j+ 4, XMM1);
+		_mm_store_ps(logmdct+j+ 8, XMM2);
+		_mm_store_ps(logmdct+j+12, XMM3);
+	}
+#else	/* __SSE2__ */
+	/*
+		SSE optimized code
+	*/
+	for(j=0;j<n/2;j+=16)
+	{
+		__m128x	U0, U1, U2, U3;
+		__m128	XMM0, XMM1, XMM2, XMM3;
+		XMM0	 = _mm_load_ps(mdct+j   );
+		XMM1	 = _mm_load_ps(mdct+j+ 4);
+		XMM2	 = _mm_load_ps(mdct+j+ 8);
+		XMM3	 = _mm_load_ps(mdct+j+12);
+		XMM0	 = _mm_and_ps(XMM0, PM128(PABSMASK));
+		XMM1	 = _mm_and_ps(XMM1, PM128(PABSMASK));
+		XMM2	 = _mm_and_ps(XMM2, PM128(PABSMASK));
+		XMM3	 = _mm_and_ps(XMM3, PM128(PABSMASK));
+		U0.ps	 = XMM0;
+		U1.ps	 = XMM1;
+		U2.ps	 = XMM2;
+		U3.ps	 = XMM3;
+		XMM0	 = _mm_cvtpi32_ps(XMM0, U0.pi64[1]);
+		XMM1	 = _mm_cvtpi32_ps(XMM1, U1.pi64[1]);
+		XMM2	 = _mm_cvtpi32_ps(XMM2, U2.pi64[1]);
+		XMM3	 = _mm_cvtpi32_ps(XMM3, U3.pi64[1]);
+		XMM0	 = _mm_movelh_ps(XMM0, XMM0);
+		XMM1	 = _mm_movelh_ps(XMM1, XMM1);
+		XMM2	 = _mm_movelh_ps(XMM2, XMM2);
+		XMM3	 = _mm_movelh_ps(XMM3, XMM3);
+		XMM0	 = _mm_cvtpi32_ps(XMM0, U0.pi64[0]);
+		XMM1	 = _mm_cvtpi32_ps(XMM1, U1.pi64[0]);
+		XMM2	 = _mm_cvtpi32_ps(XMM2, U2.pi64[0]);
+		XMM3	 = _mm_cvtpi32_ps(XMM3, U3.pi64[0]);
+		XMM0	 = _mm_mul_ps(XMM0, PM128(mparm));
+		XMM1	 = _mm_mul_ps(XMM1, PM128(mparm));
+		XMM2	 = _mm_mul_ps(XMM2, PM128(mparm));
+		XMM3	 = _mm_mul_ps(XMM3, PM128(mparm));
+		XMM0	 = _mm_add_ps(XMM0, PM128(PFV0));
+		XMM1	 = _mm_add_ps(XMM1, PM128(PFV0));
+		XMM2	 = _mm_add_ps(XMM2, PM128(PFV0));
+		XMM3	 = _mm_add_ps(XMM3, PM128(PFV0));
+		_mm_store_ps(logmdct+j   , XMM0);
+		_mm_store_ps(logmdct+j+ 4, XMM1);
+		_mm_store_ps(logmdct+j+ 8, XMM2);
+		_mm_store_ps(logmdct+j+12, XMM3);
+	}
+	_mm_empty();
+#endif
+}
+#endif														/* SSE Optimize */
+
+
 static int mapping0_forward(vorbis_block *vb){
   vorbis_dsp_state      *vd=vb->vd;
   vorbis_info           *vi=vd->vi;
@@ -329,7 +837,11 @@ static int mapping0_forward(vorbis_block *vb){
 
     /* transform the PCM data */
     /* only MDCT right now.... */
+#if	defined(__SSE__)										/* SSE Optimize */
+    mdct_forward(b->transform[vb->W][0],pcm,gmdct[i]/*, gmdct_org[i]*/);
+#else														/* SSE Optimize */
     mdct_forward(b->transform[vb->W][0],pcm,gmdct[i]);
+#endif														/* SSE Optimize */
 
     /* FFT yields more accurate tonal estimation (not phase sensitive) */
     drft_forward(&b->fft_look[vb->W],pcm);
@@ -348,6 +860,9 @@ static int mapping0_forward(vorbis_block *vb){
                                      recalibrate the tunings in the
                                      next major model upgrade. */
     local_ampmax[i]=logfft[0];
+#ifdef __SSE__												/* SSE Optimize */
+	mapping_forward_sub0(pcm, logfft, scale_dB, local_ampmax, i, n);
+#else														/* SSE Optimize */
     for(j=1;j<n-1;j+=2){
       float temp=pcm[j]*pcm[j]+pcm[j+1]*pcm[j+1];
       temp=logfft[(j+1)>>1]=scale_dB+.5f*todB(&temp)  + .345; /* +
@@ -367,6 +882,7 @@ static int mapping0_forward(vorbis_block *vb){
                                      next major model upgrade. */
       if(temp>local_ampmax[i])local_ampmax[i]=temp;
     }
+#endif														/* SSE Optimize */
 
     if(local_ampmax[i]>0.f)local_ampmax[i]=0.f;
     if(local_ampmax[i]>global_ampmax)global_ampmax=local_ampmax[i];
@@ -414,6 +930,9 @@ static int mapping0_forward(vorbis_block *vb){
       floor_posts[i]=_vorbis_block_alloc(vb,PACKETBLOBS*sizeof(**floor_posts));
       memset(floor_posts[i],0,sizeof(**floor_posts)*PACKETBLOBS);
 
+#ifdef __SSE__												/* SSE Optimize */
+	mapping_forward_sub1(mdct, logmdct, n);
+#else														/* SSE Optimize */
       for(j=0;j<n/2;j++)
         logmdct[j]=todB(mdct+j)  + .345; /* + .345 is a hack; the original
                                      todB estimation used on IEEE 754
@@ -429,6 +948,7 @@ static int mapping0_forward(vorbis_block *vb){
                                      things back up here, and
                                      recalibrate the tunings in the
                                      next major model upgrade. */
+#endif														/* SSE Optimize */
 
 #if 0
       if(vi->channels==2){
@@ -858,6 +1378,77 @@ static int mapping0_inverse(vorbis_block *vb,vorbis_info_mapping *l){
 
   /* channel coupling */
   for(i=info->coupling_steps-1;i>=0;i--){
+#ifdef	__SSE__												/* SSE Optimize */
+	{
+		float	*PCMM	 = vb->pcm[info->coupling_mag[i]];
+		float	*PCMA	 = vb->pcm[info->coupling_ang[i]];
+		int	Lim	 = (n/2)&(~7);
+		for(j=0;j<Lim;j+=8){
+			__m128	XMM0, XMM1, XMM2, XMM3, XMM4, XMM5;
+			XMM0	 = _mm_load_ps(PCMA+j  );
+			XMM3	 = _mm_load_ps(PCMA+j+4);
+			XMM1	 = _mm_load_ps(PCMM+j  );
+			XMM4	 = _mm_load_ps(PCMM+j+4);
+			XMM2	 = XMM0;
+			XMM5	 = XMM3;
+			XMM0	 = _mm_cmpnle_ps(XMM0, PM128(PFV_0));
+			XMM3	 = _mm_cmpnle_ps(XMM3, PM128(PFV_0));
+			XMM1	 = _mm_xor_ps(XMM1, XMM2);
+			XMM4	 = _mm_xor_ps(XMM4, XMM5);
+			XMM1	 = _mm_andnot_ps(XMM1, PM128(PCS_RRRR));
+			XMM4	 = _mm_andnot_ps(XMM4, PM128(PCS_RRRR));
+			XMM1	 = _mm_xor_ps(XMM1, XMM2);
+			XMM4	 = _mm_xor_ps(XMM4, XMM5);
+			XMM2	 = XMM1;
+			XMM5	 = XMM4;
+			XMM1	 = _mm_and_ps(XMM1, XMM0);
+			XMM4	 = _mm_and_ps(XMM4, XMM3);
+			XMM0	 = _mm_andnot_ps(XMM0, XMM2);
+			XMM3	 = _mm_andnot_ps(XMM3, XMM5);
+			XMM2	 = _mm_load_ps(PCMM+j  );
+			XMM5	 = _mm_load_ps(PCMM+j+4);
+			XMM1	 = _mm_add_ps(XMM1, XMM2);
+			XMM4	 = _mm_add_ps(XMM4, XMM5);
+			XMM0	 = _mm_add_ps(XMM0, XMM2);
+			XMM3	 = _mm_add_ps(XMM3, XMM5);
+			_mm_store_ps(PCMA+j  , XMM1);
+			_mm_store_ps(PCMA+j+4, XMM4);
+			_mm_store_ps(PCMM+j  , XMM0);
+			_mm_store_ps(PCMM+j+4, XMM3);
+		}
+		Lim	 = (n/2)&(~3);
+		for(;j<Lim;j+=4){
+			__m128	XMM0, XMM1, XMM2;
+			XMM0	 = _mm_load_ps(PCMA+j  );
+			XMM1	 = _mm_load_ps(PCMM+j  );
+			XMM2	 = XMM0;
+			XMM0	 = _mm_cmpnle_ps(XMM0, PM128(PFV_0));
+			XMM1	 = _mm_xor_ps(XMM1, XMM2);
+			XMM1	 = _mm_andnot_ps(XMM1, PM128(PCS_RRRR));
+			XMM1	 = _mm_xor_ps(XMM1, XMM2);
+			XMM2	 = XMM1;
+			XMM1	 = _mm_and_ps(XMM1, XMM0);
+			XMM0	 = _mm_andnot_ps(XMM0, XMM2);
+			XMM2	 = _mm_load_ps(PCMM+j  );
+			XMM1	 = _mm_add_ps(XMM1, XMM2);
+			XMM0	 = _mm_add_ps(XMM0, XMM2);
+			_mm_store_ps(PCMA+j  , XMM1);
+			_mm_store_ps(PCMM+j  , XMM0);
+		}
+		for(;j<n/2;j++){
+			float mag=PCMM[j];
+			float ang=PCMA[j];
+
+			if(ang>0){
+				PCMM[j]=mag;
+				PCMA[j]=mag > 0 ? mag-ang : mag+ang;
+			}else{
+				PCMM[j]=mag > 0 ? mag+ang : mag-ang;
+				PCMA[j]=mag;
+			}
+		}
+	}
+#else														/* SSE Optimize */
     float *pcmM=vb->pcm[info->coupling_mag[i]];
     float *pcmA=vb->pcm[info->coupling_ang[i]];
 
@@ -882,6 +1473,7 @@ static int mapping0_inverse(vorbis_block *vb,vorbis_info_mapping *l){
           pcmM[j]=mag-ang;
         }
     }
+#endif														/* SSE Optimize */
   }
 
   /* compute and apply spectral envelope */

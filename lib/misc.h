@@ -50,8 +50,19 @@ extern void _VDBG_free(void *ptr,char *file,long line);
 #endif
 #endif
 
+#ifdef __SSE__												/* SSE Optimize */
+#include "xmmlib.h"
+#undef _ogg_malloc
+#undef _ogg_calloc
+#undef _ogg_realloc
+#undef _ogg_free
+#undef _ogg_alloca
+
+#define _ogg_malloc(x) xmm_malloc(x)
+#define _ogg_calloc(x,y) xmm_calloc((x), (y))
+#define _ogg_realloc(x,y) xmm_realloc((x), (y))
+#define _ogg_alloca(x) xmm_align(alloca((x)+16))
+#define _ogg_free(x) xmm_free(x)
+#endif														/* SSE Optimize */
+
 #endif
-
-
-
-

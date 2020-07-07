@@ -8,13 +8,13 @@ lib_LTLIBRARIES = libvorbis.la libvorbisfile.la libvorbisenc.la
 
 libvorbis_la_SOURCES = mdct.c smallft.c block.c envelope.c window.c lsp.c \
 			lpc.c analysis.c synthesis.c psy.c info.c \
-			floor1.c floor0.c\
+			floor1.c floor0.c cpu.c xmmlib.c\
 			res0.c mapping0.c registry.c codebook.c sharedbook.c\
 			lookup.c bitrate.c\
 			envelope.h lpc.h lsp.h codebook.h misc.h psy.h\
 			masking.h os.h mdct.h smallft.h highlevel.h\
 			registry.h scales.h window.h lookup.h lookup_data.h\
-			codec_internal.h backends.h bitrate.h 
+			codec_internal.h backends.h bitrate.h xmmlib.h 
 libvorbis_la_LDFLAGS = -no-undefined -version-info @V_LIB_CURRENT@:@V_LIB_REVISION@:@V_LIB_AGE@
 libvorbis_la_LIBADD = @VORBIS_LIBS@ @OGG_LIBS@
 
@@ -50,7 +50,7 @@ check: $(noinst_PROGRAMS)
 #test_codebook_SOURCES = codebook.c
 #test_codebook_CFLAGS = -D_V_SELFTEST
 
-test_sharedbook_SOURCES = sharedbook.c
+test_sharedbook_SOURCES = sharedbook.c xmmlib.c
 test_sharedbook_CFLAGS = -D_V_SELFTEST
 test_sharedbook_LDADD = @VORBIS_LIBS@
 
