@@ -40,7 +40,7 @@
 #elif defined(__SSE__)
 #define ENCODE_VENDOR_STRING "BS; LancerMod(SSE) (based on aoTuV 6.03 (2020))"
 #else
-#define ENCODE_VENDOR_STRING "AO; aoTuV 6.03 (2020) (based on libVorbis 1.3.7)"
+#define ENCODE_VENDOR_STRING "AO; aoTuV [20110424] (based on libvorbis 1.3.7)"
 #endif
 
 /* helpers */
