@@ -30,7 +30,7 @@
 #include "os.h"
 
 #define GENERAL_VENDOR_STRING "aoTuV Beta 6.03 (2020)"
-#define ENCODE_VENDOR_STRING "AO; aoTuV 6.03 (2020) (based on libVorbis 1.3.7)"
+#define ENCODE_VENDOR_STRING "AO; aoTuV [20110424] (based on libvorbis 1.3.7)"
 
 /* helpers */
 static void _v_writestring(oggpack_buffer *o,const char *s, int bytes){
