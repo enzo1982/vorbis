@@ -600,8 +600,9 @@ long vorbis_book_decodevv_add(codebook *book,float **a,long offset,int ch,
 #ifdef __SSE__												/* SSE Optimize */
 	if(ch==2)
 	{
-		int mid0 = (offset/2+3)&(~3);
-		int mid1 = ((offset+n)/2)&(~3);
+		int step = book->dim>=4?8:4;
+		int mid0 = (offset/2+(step-1))&(~(step-1));
+		int mid1 = ((offset+n)/2)&(~(step-1));
 		float *bvl = book->valuelist;
 		float *a0 = a[0];
 		float *a1 = a[1];
@@ -637,7 +638,7 @@ long vorbis_book_decodevv_add(codebook *book,float **a,long offset,int ch,
 						const float *t	 = bvl+entry*2;
 						__m128	XMM0 = _mm_load_ss(t  );
 						__m128	XMM1 = _mm_load_ss(a0+i);
-						__m128	XMM2 = _mm_load_ss(t  );
+						__m128	XMM2 = _mm_load_ss(t+1);
 						__m128	XMM3 = _mm_load_ss(a1+i);
 						XMM0	 = _mm_add_ss(XMM0, XMM1);
 						XMM2	 = _mm_add_ss(XMM2, XMM3);
@@ -699,7 +700,7 @@ long vorbis_book_decodevv_add(codebook *book,float **a,long offset,int ch,
 						const float *t	 = bvl+entry*2;
 						__m128	XMM0 = _mm_load_ss(t  );
 						__m128	XMM1 = _mm_load_ss(a0+i);
-						__m128	XMM2 = _mm_load_ss(t  );
+						__m128	XMM2 = _mm_load_ss(t+1);
 						__m128	XMM3 = _mm_load_ss(a1+i);
 						XMM0	 = _mm_add_ss(XMM0, XMM1);
 						XMM2	 = _mm_add_ss(XMM2, XMM3);
